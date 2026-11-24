@@ -1,0 +1,127 @@
+'use strict';
+
+const byId = (id) => document.getElementById(id);
+const toast = byId('toast');
+const toastMessage = byId('toastMessage');
+let toastTimer;
+
+requestAnimationFrame(() => document.body.classList.add('dashboard-ready'));
+
+function showToast(message) {
+	toastMessage.textContent = message;
+	toast.classList.add('is-visible');
+	clearTimeout(toastTimer);
+	toastTimer = setTimeout(() => toast.classList.remove('is-visible'), 3200);
+}
+
+const search = byId('dashboardSearch');
+const activityRows = [...document.querySelectorAll('.activity-row')];
+const emptySearch = byId('emptySearch');
+
+function filterActivity() {
+	const term = search.value.trim().toLowerCase();
+	let visibleCount = 0;
+	activityRows.forEach((row) => {
+		const searchableText = `${row.dataset.search || ''} ${row.textContent}`.toLowerCase();
+		const isVisible = !term || searchableText.includes(term);
+		row.hidden = !isVisible;
+		if (isVisible) visibleCount += 1;
+	});
+	emptySearch.hidden = visibleCount !== 0;
+}
+
+search.addEventListener('input', filterActivity);
+document.addEventListener('keydown', (event) => {
+	if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+		event.preventDefault();
+		search.focus();
+	}
+	if (event.key === 'Escape') {
+		search.value = '';
+		filterActivity();
+		closeMenu();
+	}
+});
+
+const sidebar = byId('sidebar');
+const menuButton = byId('menuButton');
+const backdrop = byId('sidebarBackdrop');
+
+function closeMenu() {
+	if (!sidebar || !menuButton || !backdrop) return;
+	sidebar.classList.remove('is-open');
+	backdrop.classList.remove('is-visible');
+	menuButton.setAttribute('aria-expanded', 'false');
+}
+
+function toggleMenu() {
+	const isOpen = !sidebar.classList.contains('is-open');
+	sidebar.classList.toggle('is-open', isOpen);
+	backdrop.classList.toggle('is-visible', isOpen);
+	menuButton.setAttribute('aria-expanded', String(isOpen));
+}
+
+menuButton?.addEventListener('click', toggleMenu);
+backdrop?.addEventListener('click', closeMenu);
+
+const hour = new Date().getHours();
+const greeting = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
+
+function initials(name) {
+	return String(name || 'Alex Smith').trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
+}
+
+function updateIdentity(user) {
+	if (!user?.name) return;
+	const name = String(user.name).trim();
+	const firstName = name.split(/\s+/)[0] || name;
+	const heading = byId('welcomeHeading');
+	const role = user.role === 'admin' ? 'Administrator' : user.role === 'staff' ? 'Staff' : 'Member';
+	const userInitials = initials(name);
+	if (heading) {
+		heading.replaceChildren(`${greeting}, ${firstName}`, Object.assign(document.createElement('span'), { textContent: '.' }));
+	}
+	for (const id of ['dashboardMemberName', 'profileUserName', 'sidebarUserName']) {
+		const element = byId(id);
+		if (element) element.textContent = name;
+	}
+	for (const id of ['dashboardUsername']) {
+		const element = byId(id);
+		if (element) element.textContent = String(user.username || '—');
+	}
+	for (const id of ['dashboardRole', 'profileUserRole', 'sidebarUserRole']) {
+		const element = byId(id);
+		if (element) element.textContent = role;
+	}
+	for (const id of ['profileAvatar', 'sidebarUserAvatar']) {
+		const element = byId(id);
+		if (element) element.textContent = userInitials;
+	}
+	window.setTimeout(() => showToast(`Welcome back, ${firstName}. Your dashboard is ready.`), 420);
+}
+
+const isLoopback = location.hostname === '127.0.0.1' || location.hostname === 'localhost';
+const isOpenDesignPreview = location.hostname.includes('vscode-resource') || (isLoopback && location.port !== '8001');
+if (!isOpenDesignPreview) {
+	fetch('/api?action=state', { credentials: 'same-origin' })
+		.then((response) => {
+			if (!response.ok) throw new Error('Your account could not be verified. Please sign in again.');
+			return response.json();
+		})
+		.then((state) => {
+			if (!state.user) {
+				location.replace('/?signin=1');
+				return;
+			}
+			updateIdentity(state.user);
+		})
+		.catch((error) => showToast(error.message || 'The dashboard could not load your account details.'));
+}
+
+document.querySelectorAll('a[href*="world.html"]').forEach((link) => {
+	if (window.matchMedia('(max-width: 900px)').matches) {
+		const destination = new URL(link.href, location.href);
+		destination.searchParams.set('mobile', '1');
+		link.href = `${destination.pathname}${destination.search}`;
+	}
+});

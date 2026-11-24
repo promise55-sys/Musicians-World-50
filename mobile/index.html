@@ -7,9 +7,9 @@
 	<meta name="description" content="Sign in to Musicians World, a global community for musicians.">
 	<title>Musicians World | Mobile access</title>
 	<link rel="icon" type="image/svg+xml" href="/assets/musicians-world-profile.svg">
-	<link rel="stylesheet" href="/mobile/style.css?v=7">
+	<link rel="stylesheet" href="/mobile/style.css?v=9">
 	<script src="/translations.js?v=4" defer></script>
-	<script src="/app.js?v=26" defer></script>
+	<script src="/app.js?v=32" defer></script>
 </head>
 <body>
 	<section class="music-splash" id="welcomeSplash" aria-label="Welcome to Musicians World">
@@ -44,6 +44,7 @@
 				<form id="loginForm">
 					<div class="mobile-field"><label for="username">Email or username</label><input id="username" name="username" autocomplete="username" placeholder="name@example.com or alex.admin" required><p class="mobile-hint">Use the email address on your account or your username.</p></div>
 					<div class="mobile-field"><label for="password">Password</label><div class="mobile-password"><input id="password" name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required><button class="mobile-reveal" id="togglePassword" type="button" aria-label="Show password">Show</button></div></div>
+					<div class="mobile-field" id="loginOtpField" hidden><label for="loginTotpCode">Authenticator code</label><input id="loginTotpCode" name="totpCode" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000"><p class="mobile-hint">Enter the current six-digit code from your authenticator app.</p></div>
 					<div class="mobile-remember"><label><input id="savePassword" type="checkbox"><span>Save password in this browser</span></label><p class="mobile-hint">Uses your browser password manager. The app never stores your plain-text password.</p></div>
 					<button class="mobile-primary" type="submit">Continue securely <span aria-hidden="true">→</span></button>
 					<p class="mobile-message" id="loginMessage" role="alert"></p>

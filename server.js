@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const http = require('node:http');
 const fs = require('node:fs');
@@ -23,6 +23,9 @@ const assets = new Map([
 	['/assets/musicians-world-profile.svg', [path.join('assets', 'musicians-world-profile.svg'), 'image/svg+xml; charset=utf-8']],
 	['/assets/live-stage.mp4', [path.join('assets', 'live-stage.mp4'), 'video/mp4']],
 	['/assets/live-stage-poster.jpg', [path.join('assets', 'live-stage-poster.jpg'), 'image/jpeg']],
+	['/dashboard.html', ['dashboard.html', 'text/html; charset=utf-8']],
+	['/dashboard.css', ['dashboard.css', 'text/css; charset=utf-8']],
+	['/dashboard.js', ['dashboard.js', 'text/javascript; charset=utf-8']],
 ]);
 
 const liveReloadClients = new Set();
@@ -36,7 +39,7 @@ function notifyLiveReload(filename) {
 }
 
 if (DEVELOPMENT) {
-	const watchedFiles = new Set(['index.html', 'world.html', 'style.css', 'app.js', 'translations.js']);
+	const watchedFiles = new Set(['index.html', 'world.html', 'style.css', 'app.js', 'translations.js', 'dashboard.html', 'dashboard.css', 'dashboard.js']);
 	fs.watch(ROOT, { persistent: false }, (_event, changedFile) => {
 		const filename = changedFile && String(changedFile);
 		if (watchedFiles.has(filename)) notifyLiveReload(filename);

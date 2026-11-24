@@ -15,6 +15,16 @@ let googleSignInNonce = '';
 let languageChosenBeforeSignIn = false;
 const mobileMode = location.pathname === '/mobile' || location.pathname.startsWith('/mobile/') || new URLSearchParams(location.search).get('mobile') === '1';
 let communityData = { posts: [], replies: [], gigs: [], musicians: [], tracks: [], comments: [], profile: {}, user: null };
+let communityCall = null;
+let callInboxTimer = null;
+let callEventsTimer = null;
+let callHeartbeatTimer = null;
+let pendingIncomingCall = null;
+let voiceRecorder = null;
+let voiceRecordingStream = null;
+let voiceRecordingChunks = [];
+let voiceRecordingTimer = null;
+let paymentVerificationStarted = '';
 let detectedCountry = '';
 let worldTimeZoneId = '';
 const countryCodesByName = new Map();
@@ -72,6 +82,29 @@ function countryFlag(code) {
 		: '';
 }
 
+function updateSeasonalTheme(user) {
+	const southernCountries = new Set(['AR', 'AU', 'BO', 'BR', 'BW', 'CL', 'FJ', 'LS', 'MG', 'MU', 'MZ', 'NA', 'NZ', 'PY', 'PE', 'ZA', 'SZ', 'UY', 'ZM', 'ZW']);
+	const month = new Date().getMonth();
+	const christmas = month === 11 && new Date().getDate() <= 26;
+	const southern = southernCountries.has(String(user.countryCode || '').toUpperCase());
+	const northSeason = month <= 1 || month === 11 ? 'winter' : month <= 4 ? 'spring' : month <= 7 ? 'summer' : 'autumn';
+	const opposite = { winter: 'summer', spring: 'autumn', summer: 'winter', autumn: 'spring' };
+	const season = christmas ? 'christmas' : southern ? opposite[northSeason] : northSeason;
+	const label = christmas ? 'Christmas season' : `${season[0].toUpperCase()}${season.slice(1)} season`;
+	const workspace = byId('appView');
+	const status = byId('seasonStatus');
+	if (workspace) workspace.dataset.season = season;
+	if (status) {
+		status.textContent = `Now: ${label}`;
+		status.title = `Detected from your registration country: ${user.country || 'not provided'}`;
+	}
+	const key = `mw-season:${Number(user.id)}`;
+	const previous = localStorage.getItem(key);
+	localStorage.setItem(key, season);
+	if (previous && previous !== season && status) status.dataset.changed = 'true';
+	else if (status) delete status.dataset.changed;
+}
+
 function localizedCountryName(code, fallback) {
 	if (!code) return fallback;
 	try { return new Intl.DisplayNames([window.MWLocale?.language || 'en'], { type: 'region' }).of(code) || fallback; }
@@ -79,14 +112,17 @@ function localizedCountryName(code, fallback) {
 }
 
 const heroPromoVideos = [
-	{ title: 'Featured gospel concert', channel: 'Musicians World', category: 'Offline concert video', description: 'Watch the locally hosted live concert video, even when you are offline.' },
+	{ title: 'Featured gospel concert', channel: 'Musicians World', category: 'Live gospel', description: 'A locally hosted concert clip, ready to play right here.' },
+	{ title: 'The Praise · Live', channel: 'Diana Hamilton Official', category: 'Ghanaian gospel', description: 'A powerful live praise moment with Diana Hamilton and Sofo QB.', videoId: 'MrWEWiZDx9Q' },
+	{ title: 'Spirit Of Praise 7 · Part 1', channel: 'Spirit Network', category: 'South African gospel', description: 'Nine live praise songs recorded in Johannesburg.', videoId: 'iDQ4TFhQ2iU' },
+	{ title: 'Spirit Of Praise 7 · Part 2', channel: 'Spirit Of Praise', category: 'South African gospel', description: 'A second set of live worship performances from Spirit Of Praise.', videoId: 'QeKfk4qPARE' },
+	{ title: 'The Iconic Experience', channel: 'The Icons Music Official', category: 'East African gospel', description: 'A live gospel experience featuring Kenyan and African worship music.', videoId: 'FwU99s4pfzA' },
 ];
 
 function initializeHeroPromoCarousel() {
 	const gallery = byId('heroPromoCarousel');
 	const list = byId('heroPromoList');
-	const video = byId('heroLiveVideo');
-	if (!gallery || !list || !video || gallery.dataset.initialized) return;
+	if (!gallery || !list || gallery.dataset.initialized) return;
 	gallery.dataset.initialized = 'true';
 	for (const promo of heroPromoVideos) {
 		const card = document.createElement('article');
@@ -96,7 +132,7 @@ function initializeHeroPromoCarousel() {
 		preview.type = 'button';
 		preview.setAttribute('aria-label', `Play ${promo.title}`);
 		const thumbnail = document.createElement('img');
-		thumbnail.src = '/assets/live-stage-poster.jpg';
+		thumbnail.src = promo.videoId ? `https://i.ytimg.com/vi/${encodeURIComponent(promo.videoId)}/hqdefault.jpg` : '/assets/live-stage-poster.jpg';
 		thumbnail.alt = '';
 		thumbnail.loading = 'lazy';
 		thumbnail.decoding = 'async';
@@ -118,16 +154,29 @@ function initializeHeroPromoCarousel() {
 		card.append(preview, details);
 		details.append(watch);
 		list.append(card);
+		const sourceLink = document.createElement('a');
+		sourceLink.className = 'hero-promo-source';
+		sourceLink.href = promo.videoId ? `https://www.youtube.com/watch?v=${encodeURIComponent(promo.videoId)}` : '/assets/live-stage.mp4';
+		sourceLink.target = '_blank';
+		sourceLink.rel = 'noopener noreferrer';
+		sourceLink.textContent = promo.videoId ? 'Open original video' : 'Open video file';
+		details.append(sourceLink);
 		const startPlayback = () => {
-			const player = document.createElement('video');
+			const player = promo.videoId ? document.createElement('iframe') : document.createElement('video');
 			player.className = 'hero-promo-player';
 			player.title = `Watch ${promo.title}`;
-			player.src = '/assets/live-stage.mp4';
-			player.poster = '/assets/live-stage-poster.jpg';
-			player.controls = true;
-			player.playsInline = true;
-			player.autoplay = true;
-			player.preload = 'metadata';
+			if (promo.videoId) {
+				player.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(promo.videoId)}?autoplay=1&rel=0&playsinline=1`;
+				player.allow = 'autoplay; encrypted-media; picture-in-picture';
+				player.referrerPolicy = 'strict-origin-when-cross-origin';
+			} else {
+				player.src = '/assets/live-stage.mp4';
+				player.poster = '/assets/live-stage-poster.jpg';
+				player.controls = true;
+				player.playsInline = true;
+				player.autoplay = true;
+				player.preload = 'metadata';
+			}
 			preview.replaceWith(player);
 			watch.disabled = true;
 			watch.textContent = 'Video opened';
@@ -144,7 +193,6 @@ function initializeHeroPromoCarousel() {
 		});
 	}
 	byId('heroVideoSkip')?.addEventListener('click', () => {
-		video.pause();
 		byId('heroPromoCarousel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 	});
 }
@@ -154,6 +202,10 @@ initializeHeroPromoCarousel();
 function activateHeroVideo() {
 	const video = byId('heroLiveVideo');
 	if (!video || document.hidden || !appView || appView.hidden || byId('community')?.hidden) return;
+	if (video.tagName === 'IFRAME') {
+		video.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'playVideo', args: '' }), 'https://www.youtube-nocookie.com');
+		return;
+	}
 	video.muted = true;
 	video.loop = true;
 	const playback = video.play();
@@ -399,6 +451,20 @@ function formValues(form) {
 	return Object.fromEntries(new FormData(form));
 }
 
+function blobToBase64(blob) {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => {
+			const result = String(reader.result || '');
+			const separator = result.indexOf(',');
+			if (separator < 0) reject(new Error('The selected file could not be encoded.'));
+			else resolve(result.slice(separator + 1));
+		};
+		reader.onerror = () => reject(reader.error || new Error('The selected file could not be read.'));
+		reader.readAsDataURL(blob);
+	});
+}
+
 async function attachProfilePhoto(values, file) {
 	if (!(file instanceof File) || !file.size) return;
 	if (file.size > MAX_PROFILE_PHOTO_SIZE) throw new Error('Choose a profile picture that is 5 MB or smaller.');
@@ -560,6 +626,7 @@ function openWorkspace(user) {
 		return;
 	}
 	currentAccount = user;
+	updateSeasonalTheme(user);
 	byId('welcomeSplash')?.setAttribute('hidden', '');
 	window.clearInterval(splashProgressTimer);
 	splashProgressTimer = null;
@@ -591,9 +658,9 @@ function openWorkspace(user) {
 	byId('userDashboardName').textContent = user.name;
 	byId('userDashboardUsername').textContent = user.username;
 	byId('userDashboardRole').textContent = roleLabel(user.role);
+	byId('dashboardGreetingName').textContent = String(user.name || 'creator').trim().split(/\s+/)[0] || 'creator';
 	byId('listeningRoomName').textContent = `${user.name}'s listening room`;
 	byId('personalDashboardEyebrow').textContent = user.role === 'admin' ? 'Administrator workspace' : user.role === 'staff' ? 'Community staff workspace' : 'Musician workspace';
-	byId('personalDashboardHeading').textContent = user.role === 'admin' ? 'Your admin dashboard' : user.role === 'staff' ? 'Your staff dashboard' : 'Your musician dashboard';
 	byId('personalDashboardDescription').textContent = user.role === 'admin' ? 'Manage your own member profile here. Use the Account details tab for administrator account management.' : user.role === 'staff' ? 'See your member details and take part in the global musician community.' : 'See your member details and explore opportunities, collaborations, and music from around the world.';
 	byId('dashboardDate').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(new Date());
 	if (user.role === 'admin') {
@@ -601,8 +668,15 @@ function openWorkspace(user) {
 		if (!window.adminPresenceTimer) window.adminPresenceTimer = window.setInterval(updateAdminPresenceClock, 1000);
 	}
 	if (user.country) byId('worldCountry').textContent = `Country: ${countryFlag(user.countryCode)} ${user.country}`.trim();
-	selectDashboardTab('community');
-	const requestedCommunityTab = new URLSearchParams(location.search).get('tab');
+	const shopCurrency = marketplaceCurrencyForCurrentUser();
+	if (byId('marketCurrencyLabel')) byId('marketCurrencyLabel').textContent = shopCurrency || 'not supported for online checkout';
+	const listingSubmit = byId('marketplaceForm')?.querySelector('[type="submit"]');
+	if (listingSubmit) listingSubmit.disabled = !shopCurrency;
+	const dashboardParams = new URLSearchParams(location.search);
+	const requestedView = dashboardParams.get('view');
+	const paymentReturn = dashboardParams.get('marketplace') === 'payment';
+	selectDashboardTab(requestedView === 'community' || paymentReturn ? 'community' : requestedView === 'account' ? 'accountServices' : 'userDashboard');
+	const requestedCommunityTab = dashboardParams.get('tab') || (paymentReturn ? 'marketplace' : '');
 	if (['feed', 'gigs', 'musicians', 'listen', 'chat', 'marketplace'].includes(requestedCommunityTab)) {
 		selectCommunityTab(requestedCommunityTab);
 		if (requestedCommunityTab === 'chat') {
@@ -610,7 +684,14 @@ function openWorkspace(user) {
 			void refreshChatRoomSummaries();
 		}
 	}
+	if (requestedView === 'community' && dashboardParams.get('action') === 'post') {
+		window.setTimeout(() => {
+			byId('communityPostBody')?.focus();
+			byId('communityPostForm')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+		}, 0);
+	}
 	void loadCommunity();
+	startCallInboxPolling();
 	initializeWorldWidgets();
 	void prepareSigningKey();
 	void loadAccount();
@@ -656,8 +737,9 @@ function initializeSplashProgress() {
 		splash.hidden = true;
 		return;
 	}
-	const duration = 30_000;
+	const duration = 6_000;
 	const startedAt = performance.now();
+	progress.max = duration / 1000;
 	const update = () => {
 		const elapsed = Math.min(duration, performance.now() - startedAt);
 		progress.value = elapsed / 1000;
@@ -981,6 +1063,22 @@ async function loadCommunity() {
 			} else setPreferredLanguage(communityData.profile.language);
 		}
 		renderCommunity();
+		if (byId('marketplaceOrders')) void loadMarketplaceOrders();
+		const params = new URLSearchParams(location.search);
+		const reference = params.get('reference');
+		if (params.get('marketplace') === 'payment' && reference && paymentVerificationStarted !== reference) {
+			paymentVerificationStarted = reference;
+			void verifyMarketplacePayment(reference).then(() => {
+				const cleanParams = new URLSearchParams(location.search);
+				cleanParams.delete('marketplace');
+				cleanParams.delete('reference');
+				const remainingQuery = cleanParams.toString();
+				history.replaceState(null, '', `${location.pathname}${remainingQuery ? `?${remainingQuery}` : ''}${location.hash}`);
+			}).catch((error) => {
+				paymentVerificationStarted = '';
+				showMessage('marketplaceMessage', error.message);
+			});
+		}
 	} catch (error) {
 		for (const id of ['musicFeed', 'gigList', 'musicianGrid']) {
 			const container = byId(id);
@@ -1279,9 +1377,30 @@ async function loadChatMessages() {
 			const createdAt = String(message.created_at || '');
 			timestamp.dateTime = /^\d{4}-\d{2}-\d{2}$/.test(createdAt) ? `${createdAt}T12:00:00` : createdAt.includes('T') ? createdAt : `${createdAt.replace(' ', 'T')}Z`;
 			timestamp.title = communityDate(message.created_at, { dateStyle: 'medium', timeStyle: 'short' });
-			addText(bubble, 'p', 'chat-message-body', message.body);
+			if (Number(message.has_audio)) {
+				addText(bubble, 'p', 'chat-message-body', 'Voice message');
+				const audio = document.createElement('audio');
+				audio.controls = true;
+				audio.preload = 'none';
+				audio.src = `/api?action=community-message-audio&id=${encodeURIComponent(message.id)}`;
+				audio.setAttribute('aria-label', `Voice message from ${message.full_name}`);
+				bubble.append(audio);
+			} else addText(bubble, 'p', 'chat-message-body', message.body);
 			bubble.prepend(meta);
 			item.append(bubble);
+			if (Number(message.author_id) !== Number(communityData.user?.id)) {
+				const actions = document.createElement('div');
+				actions.className = 'chat-message-actions';
+				for (const [mediaType, label] of [['audio', 'Voice call'], ['video', 'Video call']]) {
+					const callButton = document.createElement('button');
+					callButton.type = 'button';
+					callButton.className = 'chat-message-call';
+					callButton.textContent = label;
+					callButton.addEventListener('click', () => void startCommunityCall(message.author_id, message.full_name, mediaType, room));
+					actions.append(callButton);
+				}
+				item.append(actions);
+			}
 			list.append(item);
 		}
 		if (wasAtBottom) list.scrollTop = list.scrollHeight;
@@ -1291,6 +1410,299 @@ async function loadChatMessages() {
 		if (byId('chatRoomSelect')?.value !== room) return;
 		list.replaceChildren();
 		addText(list, 'p', 'community-empty', error.message);
+	}
+}
+
+function showCallPanel(title, status) {
+	const panel = byId('chatCallPanel');
+	if (panel) panel.hidden = false;
+	if (byId('chatCallTitle')) byId('chatCallTitle').textContent = title;
+	if (byId('chatCallStatus')) byId('chatCallStatus').textContent = status;
+}
+
+async function sendCallSignal(signalType, payload) {
+	if (!communityCall?.id) return;
+	try {
+		await request('community-call-control', 'POST', { operation: 'signal', callId: communityCall.id, signalType, payload });
+	} catch (error) {
+		if (byId('chatCallStatus')) byId('chatCallStatus').textContent = error.message;
+	}
+}
+
+async function createCallPeer(call, role) {
+	const mediaDevices = navigator.mediaDevices;
+	if (!mediaDevices?.getUserMedia || typeof RTCPeerConnection === 'undefined') throw new Error('Calls need a supported browser and a secure connection (HTTPS or localhost).');
+	const { iceServers } = await request('community-call-config', 'GET');
+	const stream = call.stream || await mediaDevices.getUserMedia({ audio: true, video: call.media_type === 'video' });
+	if (role === 'prepare') {
+		call.stream = stream;
+		return;
+	}
+	if (!communityCall) throw new Error('The call is no longer available.');
+	const peer = new RTCPeerConnection({ iceServers });
+	call.stream = stream;
+	communityCall.stream = stream;
+	communityCall.peer = peer;
+	communityCall.remoteCandidates = [];
+	for (const track of stream.getTracks()) peer.addTrack(track, stream);
+	const localVideo = byId('localCallVideo');
+	const remoteVideo = byId('remoteCallVideo');
+	if (localVideo) {
+		localVideo.hidden = call.media_type !== 'video';
+		localVideo.srcObject = call.media_type === 'video' ? stream : null;
+	}
+	if (remoteVideo) {
+		remoteVideo.hidden = call.media_type !== 'video';
+		remoteVideo.srcObject = null;
+	}
+	peer.onicecandidate = ({ candidate }) => {
+		if (candidate) void sendCallSignal('ice', candidate.toJSON());
+	};
+	peer.ontrack = ({ streams }) => {
+		const remoteStream = streams[0];
+		if (!remoteStream) return;
+		const audio = byId('remoteCallAudio');
+		if (audio) audio.srcObject = remoteStream;
+		if (remoteVideo && call.media_type === 'video') remoteVideo.srcObject = remoteStream;
+	};
+	peer.onconnectionstatechange = () => {
+		if (!communityCall || communityCall.peer !== peer) return;
+		const state = peer.connectionState;
+		if (state === 'connected') {
+			showCallPanel(`Call with ${call.other_name}`, 'Connected');
+		} else if (state === 'failed') {
+			showCallPanel(`Call with ${call.other_name}`, 'Connection failed. Check the network or TURN configuration.');
+		} else if (state === 'disconnected') {
+			showCallPanel(`Call with ${call.other_name}`, 'Connection interrupted; trying to reconnect…');
+		}
+	};
+	if (role === 'caller') {
+		const offer = await peer.createOffer();
+		await peer.setLocalDescription(offer);
+		await sendCallSignal('offer', peer.localDescription.toJSON());
+	}
+}
+
+async function processCallSignal(signal) {
+	const peer = communityCall?.peer;
+	if (!peer || Number(signal.sender_id) === Number(communityData.user?.id)) return;
+	if (signal.signal_type === 'ice') {
+		if (!peer.remoteDescription) communityCall.remoteCandidates.push(signal.payload);
+		else await peer.addIceCandidate(signal.payload);
+		return;
+	}
+	if (signal.signal_type === 'offer' && communityCall.role === 'recipient') {
+		await peer.setRemoteDescription(signal.payload);
+		for (const candidate of communityCall.remoteCandidates.splice(0)) await peer.addIceCandidate(candidate);
+		const answer = await peer.createAnswer();
+		await peer.setLocalDescription(answer);
+		await sendCallSignal('answer', peer.localDescription.toJSON());
+		showCallPanel(`Call with ${communityCall.other_name}`, 'Connecting…');
+	} else if (signal.signal_type === 'answer' && communityCall.role === 'caller') {
+		await peer.setRemoteDescription(signal.payload);
+		for (const candidate of communityCall.remoteCandidates.splice(0)) await peer.addIceCandidate(candidate);
+		showCallPanel(`Call with ${communityCall.other_name}`, 'Connecting…');
+	}
+}
+
+async function pollCallEvents() {
+	if (!communityCall?.id || communityCall.polling) return;
+	communityCall.polling = true;
+	try {
+		const result = await request('community-call-events', 'GET', { callId: communityCall.id, after: communityCall.lastSignalId });
+		for (const signal of result.signals || []) {
+			communityCall.lastSignalId = Math.max(communityCall.lastSignalId, Number(signal.id) || 0);
+			await processCallSignal(signal);
+		}
+		if (['ended', 'declined', 'expired'].includes(result.call.status)) {
+			const message = result.call.status === 'declined' ? 'The call was declined.' : result.call.status === 'expired' ? 'The call timed out.' : 'The call ended.';
+			closeCommunityCall(message);
+			return;
+		}
+		if (result.call.status === 'active' && !communityCall.heartbeatAt) {
+			communityCall.heartbeatAt = Date.now();
+			callHeartbeatTimer = window.setInterval(() => {
+				if (communityCall?.id) void request('community-call-control', 'POST', { operation: 'heartbeat', callId: communityCall.id }).catch((error) => {
+					if (byId('chatCallStatus')) byId('chatCallStatus').textContent = error.message;
+				});
+			}, 60_000);
+		}
+	} catch (error) {
+		if (communityCall && byId('chatCallStatus')) byId('chatCallStatus').textContent = error.message;
+	} finally {
+		if (communityCall) communityCall.polling = false;
+	}
+}
+
+function closeCommunityCall(message = '') {
+	if (callEventsTimer) window.clearInterval(callEventsTimer);
+	if (callHeartbeatTimer) window.clearInterval(callHeartbeatTimer);
+	callEventsTimer = null;
+	callHeartbeatTimer = null;
+	if (communityCall?.peer) communityCall.peer.close();
+	for (const track of communityCall?.stream?.getTracks() || []) track.stop();
+	for (const id of ['localCallVideo', 'remoteCallVideo', 'remoteCallAudio']) {
+		const media = byId(id);
+		if (media) media.srcObject = null;
+	}
+	communityCall = null;
+	if (byId('chatCallPanel')) byId('chatCallPanel').hidden = true;
+	if (byId('chatCallStatus')) byId('chatCallStatus').textContent = '';
+	if (message) showMessage('chatRoomStatus', message);
+}
+
+async function endCommunityCall() {
+	const callId = communityCall?.id;
+	closeCommunityCall();
+	if (!callId) return;
+	try { await request('community-call-control', 'POST', { operation: 'end', callId }); }
+	catch (error) { showMessage('chatRoomStatus', error.message); }
+}
+
+async function startCommunityCall(recipientId, recipientName, mediaType, room) {
+	if (communityCall) {
+		showMessage('chatRoomStatus', 'Finish your current call before starting another.');
+		return;
+	}
+	let call;
+	try {
+		call = { id: '', room, media_type: mediaType, other_name: recipientName, role: 'caller', lastSignalId: 0 };
+		await createCallPeer(call, 'prepare');
+		const result = await request('community-call-control', 'POST', { operation: 'create', room, recipientId, mediaType });
+		call.id = result.callId;
+		communityCall = call;
+		showCallPanel(`${mediaType === 'video' ? 'Video' : 'Voice'} call with ${recipientName}`, 'Calling…');
+		await createCallPeer(call, 'caller');
+		callEventsTimer = window.setInterval(() => void pollCallEvents(), 1_200);
+		void pollCallEvents();
+	} catch (error) {
+		if (communityCall) closeCommunityCall();
+		for (const track of call?.stream?.getTracks() || []) track.stop();
+		let message = error.message;
+		if (call?.id) {
+			try { await request('community-call-control', 'POST', { operation: 'end', callId: call.id }); }
+			catch (cleanupError) { message += ` Call cleanup also failed: ${cleanupError.message}`; }
+		}
+		showMessage('chatRoomStatus', message);
+	}
+}
+
+async function pollIncomingCalls() {
+	if (!currentAccount || communityCall || pendingIncomingCall || appView?.hidden) return;
+	try {
+		const { calls } = await request('community-call-inbox', 'GET');
+		if (!calls?.length || communityCall || pendingIncomingCall) return;
+		pendingIncomingCall = calls[0];
+		selectDashboardTab('community');
+		selectCommunityTab('chat');
+		selectChatRoom(pendingIncomingCall.room);
+		const text = byId('incomingCallText');
+		if (text) text.textContent = `${pendingIncomingCall.caller_name} is calling (${pendingIncomingCall.media_type === 'video' ? 'video' : 'voice'}).`;
+		const panel = byId('incomingCallPanel');
+		if (panel) panel.hidden = false;
+	} catch (error) {
+		showMessage('chatRoomStatus', error.message);
+	}
+}
+
+async function acceptIncomingCall() {
+	if (!pendingIncomingCall || communityCall) return;
+	const incoming = pendingIncomingCall;
+	try {
+		await request('community-call-control', 'POST', { operation: 'accept', callId: incoming.id });
+		communityCall = { ...incoming, id: incoming.id, media_type: incoming.media_type, other_name: incoming.caller_name, role: 'recipient', lastSignalId: 0 };
+		if (byId('incomingCallPanel')) byId('incomingCallPanel').hidden = true;
+		pendingIncomingCall = null;
+		await createCallPeer(communityCall, 'recipient');
+		showCallPanel(`Call with ${communityCall.other_name}`, 'Connecting…');
+		callEventsTimer = window.setInterval(() => void pollCallEvents(), 1_200);
+		void pollCallEvents();
+	} catch (error) {
+		closeCommunityCall();
+		pendingIncomingCall = null;
+		if (byId('incomingCallPanel')) byId('incomingCallPanel').hidden = true;
+		let message = error.message;
+		try { await request('community-call-control', 'POST', { operation: 'end', callId: incoming.id }); }
+		catch (cleanupError) { message += ` Call cleanup also failed: ${cleanupError.message}`; }
+		showMessage('chatRoomStatus', message);
+	}
+}
+
+async function declineIncomingCall() {
+	if (!pendingIncomingCall) return;
+	const callId = pendingIncomingCall.id;
+	pendingIncomingCall = null;
+	if (byId('incomingCallPanel')) byId('incomingCallPanel').hidden = true;
+	try { await request('community-call-control', 'POST', { operation: 'decline', callId }); }
+	catch (error) { showMessage('chatRoomStatus', error.message); }
+}
+
+function startCallInboxPolling() {
+	if (callInboxTimer) return;
+	callInboxTimer = window.setInterval(() => void pollIncomingCalls(), 2_500);
+	void pollIncomingCalls();
+}
+
+function marketplaceCurrencyForCurrentUser() {
+	return ({ GH: 'GHS', US: 'USD' })[String(currentAccount?.countryCode || '').toUpperCase()] || '';
+}
+
+async function attachMarketplacePhoto(values, file) {
+	if (!(file instanceof File) || !file.size) return;
+	if (file.size > 2 * 1024 * 1024) throw new Error('Choose an item photo that is 2 MB or smaller.');
+	if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) throw new Error('Choose a JPEG, PNG, or WebP item photo.');
+	values.imageMime = file.type;
+	values.imageBase64 = await blobToBase64(file);
+}
+
+async function recordVoiceMessage() {
+	const button = byId('voiceRecordButton');
+	if (!button || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+		showMessage('chatMessageStatus', 'Voice recording needs a supported browser and a secure connection (HTTPS or localhost).');
+		return;
+	}
+	if (voiceRecorder?.state === 'recording') {
+		voiceRecorder.stop();
+		button.disabled = true;
+		return;
+	}
+	try {
+		voiceRecordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+		const mimeType = ['audio/webm;codecs=opus', 'audio/ogg;codecs=opus', 'audio/mp4'].find((type) => MediaRecorder.isTypeSupported(type));
+		voiceRecorder = new MediaRecorder(voiceRecordingStream, mimeType ? { mimeType } : undefined);
+		voiceRecordingChunks = [];
+		voiceRecorder.ondataavailable = (event) => { if (event.data.size) voiceRecordingChunks.push(event.data); };
+		voiceRecorder.onerror = (event) => showMessage('chatMessageStatus', event.error?.message || 'The voice recording failed.');
+		voiceRecorder.onstop = async () => {
+			window.clearTimeout(voiceRecordingTimer);
+			voiceRecordingTimer = null;
+			for (const track of voiceRecordingStream?.getTracks() || []) track.stop();
+			voiceRecordingStream = null;
+			button.disabled = false;
+			button.textContent = 'Record voice';
+			const blob = new Blob(voiceRecordingChunks, { type: voiceRecorder.mimeType || 'audio/webm' });
+			voiceRecorder = null;
+			voiceRecordingChunks = [];
+			if (!blob.size) { showMessage('chatMessageStatus', 'No audio was recorded. Try again.'); return; }
+			if (blob.size > 1.5 * 1024 * 1024) { showMessage('chatMessageStatus', 'That recording is larger than 1.5 MB. Record a shorter message.'); return; }
+			button.disabled = true;
+			try {
+				const result = await request('community-voice', 'POST', { room: byId('chatRoomSelect').value, audioMime: blob.type.split(';')[0], audioBase64: await blobToBase64(blob) });
+				showMessage('chatMessageStatus', result.message, true);
+				await loadChatMessages();
+			} catch (error) { showMessage('chatMessageStatus', error.message); }
+			finally { button.disabled = false; }
+		};
+		voiceRecorder.start(250);
+		button.textContent = 'Stop and send';
+		showMessage('chatMessageStatus', 'Recording… Select “Stop and send” when finished.');
+		voiceRecordingTimer = window.setTimeout(() => {
+			if (voiceRecorder?.state === 'recording') voiceRecorder.stop();
+		}, 60_000);
+	} catch (error) {
+		for (const track of voiceRecordingStream?.getTracks() || []) track.stop();
+		voiceRecordingStream = null;
+		showMessage('chatMessageStatus', error.name === 'NotAllowedError' ? 'Microphone permission was denied.' : error.message || 'Could not start voice recording.');
 	}
 }
 
@@ -1306,12 +1718,32 @@ function renderMarketplaceListings() {
 	for (const listing of listings) {
 		const card = document.createElement('article');
 		card.className = 'marketplace-item';
+		const isPricedListing = listing.price_amount !== null && listing.price_amount !== '' && Number.isFinite(Number(listing.price_amount)) && Boolean(listing.currency);
+		if (Number(listing.has_image)) {
+			const image = document.createElement('img');
+			image.className = 'marketplace-image';
+			image.src = `/api?action=marketplace-image&id=${encodeURIComponent(listing.id)}`;
+			image.alt = `${listing.title} for sale`;
+			image.loading = 'lazy';
+			card.append(image);
+		}
 		addText(card, 'span', 'marketplace-category', ({ instrument: 'Instrument', equipment: 'Audio equipment', accessory: 'Accessory', other: 'Other' })[listing.category] || 'Music gear');
 		addText(card, 'h4', '', listing.title);
-		if (listing.price) addText(card, 'strong', 'marketplace-price', listing.price);
+		if (isPricedListing) {
+			addText(card, 'strong', 'marketplace-price', formatMarketplacePrice(listing.price_amount, listing.currency));
+			addText(card, 'small', 'marketplace-stock', Number(listing.stock) > 0 ? `${listing.stock} available · seller-arranged delivery` : 'Sold out');
+		} else if (listing.price) addText(card, 'strong', 'marketplace-price', listing.price);
 		addText(card, 'p', 'gig-meta', listing.location);
 		addText(card, 'p', '', listing.description);
 		addText(card, 'small', 'gig-poster', `Listed by ${listing.full_name}`);
+		if (isPricedListing && Number(listing.stock) > 0 && Number(listing.seller_id) !== Number(communityData.user?.id)) {
+			const buy = document.createElement('button');
+			buy.type = 'button';
+			buy.className = 'marketplace-buy-button';
+			buy.textContent = 'Buy with Paystack';
+			buy.addEventListener('click', () => openMarketplaceCheckout(listing));
+			card.append(buy);
+		}
 		if (listing.contact_email) {
 			const contact = document.createElement('a');
 			contact.className = 'text-button';
@@ -1327,6 +1759,104 @@ function renderMarketplaceListings() {
 			}, true);
 		}
 		list.append(card);
+	}
+}
+
+function formatMarketplacePrice(amount, currency) {
+	try { return new Intl.NumberFormat(undefined, { style: 'currency', currency: String(currency), minimumFractionDigits: 2 }).format(Number(amount)); }
+	catch { return `${Number(amount).toFixed(2)} ${currency}`; }
+}
+
+function openMarketplaceCheckout(listing) {
+	const dialog = byId('marketplaceCheckoutDialog');
+	if (!dialog || typeof dialog.showModal !== 'function') {
+		showMessage('marketplaceMessage', 'Secure checkout is not available in this browser.');
+		return;
+	}
+	byId('checkoutListingId').value = String(listing.id);
+	byId('checkoutQuantity').max = String(Math.min(20, Number(listing.stock) || 1));
+	byId('checkoutQuantity').value = '1';
+	byId('marketplaceCheckoutItem').textContent = `${listing.title} · ${formatMarketplacePrice(listing.price_amount, listing.currency)} each. Delivery is arranged with the seller.`;
+	showMessage('marketplaceCheckoutMessage', '');
+	dialog.showModal();
+}
+
+function renderMarketplaceOrders(data) {
+	const sellerList = byId('marketplaceOrders');
+	const purchaseList = byId('marketplacePurchases');
+	if (!sellerList || !purchaseList) return;
+	sellerList.replaceChildren();
+	purchaseList.replaceChildren();
+	const sellerOrders = data.sellerOrders || [];
+	const buyerOrders = data.buyerOrders || [];
+	if (!sellerOrders.length) addText(sellerList, 'p', 'community-empty', 'No customer orders yet.');
+	for (const order of sellerOrders) {
+		const item = document.createElement('article');
+		item.className = 'marketplace-order';
+		addText(item, 'strong', '', order.title);
+		addText(item, 'span', 'marketplace-order-status', `${order.status.toUpperCase()} · ${formatMarketplacePrice(Number(order.amount_minor) / 100, order.currency)} · Qty ${order.quantity}`);
+		addText(item, 'span', '', `${order.buyer_name} · ${order.buyer_phone} · ${order.buyer_email}`);
+		addText(item, 'span', '', `Deliver to: ${order.delivery_address}${order.delivery_note ? ` · Note: ${order.delivery_note}` : ''}`);
+		const nextStatus = ({ paid: 'packing', packing: 'shipped', shipped: 'delivered' })[order.status];
+		if (nextStatus) {
+			const update = document.createElement('button');
+			update.type = 'button';
+			update.className = 'text-button';
+			update.textContent = nextStatus === 'packing' ? 'Start preparing' : nextStatus === 'shipped' ? 'Mark shipped' : 'Mark delivered';
+			update.addEventListener('click', async () => {
+				update.disabled = true;
+				try {
+					const result = await request('marketplace-order-status', 'POST', { orderId: order.id, status: nextStatus });
+					await loadMarketplaceOrders();
+					showMessage('marketplaceMessage', result.message, true);
+				} catch (error) {
+					showMessage('marketplaceMessage', error.message);
+					update.disabled = false;
+				}
+			});
+			item.append(update);
+		}
+		sellerList.append(item);
+	}
+	if (!buyerOrders.length) addText(purchaseList, 'p', 'community-empty', 'Your purchases will appear here.');
+	for (const order of buyerOrders) {
+		const item = document.createElement('article');
+		item.className = 'marketplace-order';
+		addText(item, 'strong', '', order.title);
+		addText(item, 'span', 'marketplace-order-status', `${order.status.toUpperCase()} · ${formatMarketplacePrice(Number(order.amount_minor) / 100, order.currency)} · Qty ${order.quantity}`);
+		addText(item, 'span', '', `Seller: ${order.seller_name}`);
+		if (order.status === 'pending') {
+			const verify = document.createElement('button');
+			verify.type = 'button';
+			verify.className = 'text-button';
+			verify.textContent = 'Verify payment';
+			verify.addEventListener('click', async () => {
+				verify.disabled = true;
+				try { await verifyMarketplacePayment(order.reference); }
+				catch (error) { showMessage('marketplaceMessage', error.message); }
+				finally { verify.disabled = false; }
+			});
+			item.append(verify);
+		}
+		purchaseList.append(item);
+	}
+}
+
+async function loadMarketplaceOrders() {
+	if (!currentAccount || !byId('marketplaceOrders')) return;
+	try { renderMarketplaceOrders(await request('marketplace-orders', 'GET')); }
+	catch (error) {
+		for (const id of ['marketplaceOrders', 'marketplacePurchases']) {
+			const list = byId(id);
+			if (list) { list.replaceChildren(); addText(list, 'p', 'community-empty', error.message); }
+		}
+	}
+
+	async function verifyMarketplacePayment(reference) {
+		const result = await request('marketplace-verify', 'GET', { reference });
+		showMessage('marketplaceMessage', result.message, Boolean(result.paid));
+		await loadMarketplaceOrders();
+		return result;
 	}
 }
 
@@ -1609,11 +2139,16 @@ byId('chatMessageBody')?.addEventListener('keydown', (event) => {
 byId('chatMessageForm')?.addEventListener('submit', async (event) => {
 	event.preventDefault();
 	const button = event.currentTarget.querySelector('[type="submit"]');
+	const body = byId('chatMessageBody').value.trim();
+	if (!body) {
+		showMessage('chatMessageStatus', 'Write a message or record a voice note first.');
+		return;
+	}
 	button.disabled = true;
 	showMessage('chatMessageStatus', '');
 	try {
 		const room = byId('chatRoomSelect').value;
-		const result = await request('community-message', 'POST', { room, body: byId('chatMessageBody').value.trim() });
+		const result = await request('community-message', 'POST', { room, body });
 		byId('chatMessageForm').reset();
 		showMessage('chatMessageStatus', result.message, true);
 		await loadChatMessages();
@@ -1622,6 +2157,11 @@ byId('chatMessageForm')?.addEventListener('submit', async (event) => {
 	finally { button.disabled = false; }
 });
 
+byId('voiceRecordButton')?.addEventListener('click', () => void recordVoiceMessage());
+byId('endCallButton')?.addEventListener('click', () => void endCommunityCall());
+byId('acceptCallButton')?.addEventListener('click', () => void acceptIncomingCall());
+byId('declineCallButton')?.addEventListener('click', () => void declineIncomingCall());
+
 byId('marketplaceForm')?.addEventListener('submit', async (event) => {
 	event.preventDefault();
 	const form = event.currentTarget;
@@ -1629,11 +2169,29 @@ byId('marketplaceForm')?.addEventListener('submit', async (event) => {
 	button.disabled = true;
 	showMessage('marketplaceMessage', '');
 	try {
-		const result = await request('marketplace-listing', 'POST', formValues(form));
+		const values = formValues(form);
+		const imageFile = values.imageFile;
+		delete values.imageFile;
+		await attachMarketplacePhoto(values, imageFile);
+		const result = await request('marketplace-listing', 'POST', values);
 		form.reset();
 		showMessage('marketplaceMessage', result.message, true);
 		await loadCommunity();
 	} catch (error) { showMessage('marketplaceMessage', error.message); }
+	finally { button.disabled = !marketplaceCurrencyForCurrentUser(); }
+});
+
+byId('cancelMarketplaceCheckout')?.addEventListener('click', () => byId('marketplaceCheckoutDialog')?.close());
+byId('marketplaceCheckoutForm')?.addEventListener('submit', async (event) => {
+	event.preventDefault();
+	const form = event.currentTarget;
+	const button = form.querySelector('[type="submit"]');
+	button.disabled = true;
+	showMessage('marketplaceCheckoutMessage', '');
+	try {
+		const result = await request('marketplace-checkout', 'POST', formValues(form));
+		location.assign(result.checkoutUrl);
+	} catch (error) { showMessage('marketplaceCheckoutMessage', error.message); }
 	finally { button.disabled = false; }
 });
 
@@ -1812,6 +2370,7 @@ async function loadAccount() {
 		const result = await request('account', 'GET');
 		currentAccount = result.user;
 		byId('accountEmail').value = result.email || '';
+		setTwoFactorState(result.twoFactorEnabled);
 	} catch (error) {
 		showMessage('accountMessage', error.message);
 	}
@@ -2086,13 +2645,32 @@ byId('loginForm')?.addEventListener('submit', async (event) => {
 	button.textContent = 'Checking securely…';
 	try {
 		const result = await request('login', 'POST', values);
+		if (result.requiresTwoFactor) {
+			if (worldTab && !worldTab.closed) worldTab.close();
+			byId('loginOtpField').hidden = false;
+			byId('loginTotpCode').required = true;
+			byId('loginTotpCode').focus();
+			showMessage('loginMessage', result.message, true);
+			return;
+		}
 		csrfToken = result.csrfToken;
+		byId('loginOtpField').hidden = true;
+		byId('loginTotpCode').value = '';
 		void savePassword(values, 'savePassword');
 		openWorkspace(result.user);
 		openWorldTab(worldTab);
 	} catch (error) { if (worldTab && !worldTab.closed) worldTab.close(); showMessage('loginMessage', error.message); }
 	finally { button.disabled = false; button.innerHTML = originalText; }
 });
+
+for (const id of ['username', 'password']) {
+	byId(id)?.addEventListener('input', () => {
+		byId('loginOtpField').hidden = true;
+		byId('loginTotpCode').required = false;
+		byId('loginTotpCode').value = '';
+		showMessage('loginMessage', '');
+	});
+}
 
 byId('signupForm')?.addEventListener('submit', async (event) => {
 	event.preventDefault();
@@ -2219,6 +2797,50 @@ byId('passwordSettingsForm')?.addEventListener('submit', async (event) => {
 		form.reset();
 		showMessage('passwordSettingsMessage', result.message, true);
 	} catch (error) { showMessage('passwordSettingsMessage', error.message); }
+});
+
+function setTwoFactorState(enabled) {
+	const on = Boolean(enabled);
+	byId('twoFactorStatus').textContent = on ? 'Enabled' : 'Not enabled';
+	byId('twoFactorStatus').classList.toggle('enabled', on);
+	byId('twoFactorOff').hidden = on;
+	byId('twoFactorOn').hidden = !on;
+	byId('twoFactorSetup').hidden = true;
+}
+
+byId('beginTwoFactorButton')?.addEventListener('click', async (event) => {
+	const button = event.currentTarget;
+	button.disabled = true;
+	try {
+		const result = await request('begin-two-factor', 'POST', {});
+		byId('twoFactorSecret').textContent = result.secret;
+		byId('twoFactorLink').href = result.otpauthUrl;
+		byId('twoFactorSetup').hidden = false;
+		byId('twoFactorStatus').textContent = 'Setup in progress';
+		showMessage('twoFactorMessage', result.message, true);
+		byId('enableTwoFactorCode').focus();
+	} catch (error) { showMessage('twoFactorMessage', error.message); }
+	finally { button.disabled = false; }
+});
+
+byId('enableTwoFactorForm')?.addEventListener('submit', async (event) => {
+	event.preventDefault();
+	try {
+		const result = await request('enable-two-factor', 'POST', formValues(event.currentTarget));
+		setTwoFactorState(true);
+		event.currentTarget.reset();
+		showMessage('twoFactorMessage', result.message, true);
+	} catch (error) { showMessage('twoFactorMessage', error.message); }
+});
+
+byId('disableTwoFactorForm')?.addEventListener('submit', async (event) => {
+	event.preventDefault();
+	try {
+		const result = await request('disable-two-factor', 'POST', formValues(event.currentTarget));
+		setTwoFactorState(false);
+		event.currentTarget.reset();
+		showMessage('twoFactorMessage', result.message, true);
+	} catch (error) { showMessage('twoFactorMessage', error.message); }
 });
 
 byId('staffForm')?.addEventListener('submit', async (event) => {

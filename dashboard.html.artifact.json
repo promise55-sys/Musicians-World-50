@@ -1,0 +1,48 @@
+{
+  "version": 1,
+  "kind": "html",
+  "title": "Musicians World Creator Dashboard",
+  "entry": "dashboard.html",
+  "renderer": "html",
+  "status": "complete",
+  "exports": [
+    "html",
+    "standalone",
+    "site",
+    "png",
+    "jpeg",
+    "pdf"
+  ],
+  "supportingFiles": [
+    "dashboard.css",
+    "dashboard.js",
+    "assets/musicians-world-profile.svg"
+  ],
+  "createdAt": "2026-11-23T10:33:56.274Z",
+  "updatedAt": "2026-11-23T10:33:56.274Z",
+  "designSystemId": "starbucks",
+  "metadata": {
+    "brief": {
+      "text": "Fix dashboard preview assets, integrate it into the Musicians World website with real account details and working navigation, add Android-style mobile navigation and tasteful entrance/toast animations.",
+      "assumptions": [
+        "Desktop retains the Starbucks-inspired dark green and warm cream palette.",
+        "Mobile uses Android-style bottom navigation and a two-column account-card grid.",
+        "Account values come from the signed-in session; fabricated analytics and events are removed.",
+        "Motion is subtle and respects reduced-motion preferences."
+      ]
+    },
+    "critique": {
+      "verdict": "polish",
+      "findings": [
+        {
+          "area": "fit",
+          "fix": "Remove the underlines and apply full-pill corners with a subtle pressed scale effect.",
+          "where": "Hero action links",
+          "problem": "The hero links looked underlined and rectangular rather than like the Starbucks style's pill CTAs."
+        }
+      ],
+      "at": "2026-11-23T10:33:56.272Z",
+      "checkRunId": "2026-11-23T10-32-40"
+    }
+  }
+}

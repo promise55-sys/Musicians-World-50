@@ -107,7 +107,9 @@ Existing deployments using `DATABASE_MODE=postgres` and `DATABASE_URL` remain su
 
 ## Email and administrator approval
 
-Public sign-ups create pending viewer accounts. The applicant receives a request-received email, an administrator receives an access-request email, and the applicant cannot sign in until an admin approves the request in the dashboard. The admin's decision is emailed to the applicant. These are sign-up and approval notices, not a message after every sign-in. Accounts created directly by an admin and existing accounts remain approved.
+Public sign-ups create pending viewer accounts. The applicant receives a welcome email explaining that the request is in, an administrator receives an access-request email, and the applicant cannot sign in until an admin approves the request in the dashboard. The admin's decision is emailed to the applicant. These are sign-up and approval notices, not a message after every sign-in. Accounts created directly by an admin and existing accounts remain approved.
+
+Password recovery sends a six-digit code to the registered email before showing the new-password form. After the code is verified and the password is changed, the app emails a security confirmation. If the confirmation email cannot be delivered, the reset still succeeds and the app says so explicitly.
 
 Email is sent through the Resend email API. Add these values to the local environment or your hosting provider's private environment settings:
 
@@ -162,8 +164,9 @@ If the previous PHP app used `AUTH_DATA_DIR` or `AUTH_PEPPER`, keep those same v
 
 - Users sign in with username or email and password.
 - Viewer sign-up becomes available after initial admin setup.
-- Admins get the team dashboard, where they can review requests, view the account directory, create accounts, remove other accounts, and edit their public profile picture and short bio. Admin profile details appear in the community directory. The final admin and the currently signed-in account cannot be removed.
-- Staff and viewers get a separate personal dashboard and cannot view the account directory or admin controls.
+- Admins get the team dashboard, where they can review requests, view the account directory, create accounts, remove other accounts, and edit their public profile picture and short bio. The account overview reports viewer, artist, and seller totals, recent registrations, and members active in the last seven days; admins can open a read-only profile and activity snapshot for each member. The final admin and the currently signed-in account cannot be removed.
+- Staff and members get a personal dashboard and cannot view the account directory or admin controls. Members can choose Viewer or a musician type (singer, instrumentalist, or seller) in their profile to get a tailored dashboard; both types can participate in community features.
+- The signed-in community includes an About admin page. It shows only the approved administrator's display name, optional introduction, and optional profile photo; account email, sign-in history, location, and other private account data are not included. The admin manages the introduction and photo from Account details.
 - All signed-in members can update their own email address.
 - Signed-in members can sign statements with ECDSA P-256/SHA-256. Public keys are stored with the account. Private signing keys remain in browser IndexedDB and are not part of database migration or backup.
 

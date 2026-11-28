@@ -8,13 +8,23 @@ const appView = byId('appView');
 const steps = { setup: byId('setupStep'), login: byId('passwordStep'), signup: byId('signupStep'), recovery: byId('recoveryStep') };
 let csrfToken = '';
 let currentAccount = null;
+let initialSetupRequired = false;
 let signingKey = null;
-let splashProgressTimer = null;
+let recoveryResendTimer = null;
 let googleSignInClientId = '';
 let googleSignInNonce = '';
 let languageChosenBeforeSignIn = false;
 const mobileMode = location.pathname === '/mobile' || location.pathname.startsWith('/mobile/') || new URLSearchParams(location.search).get('mobile') === '1';
-let communityData = { posts: [], replies: [], gigs: [], musicians: [], tracks: [], comments: [], profile: {}, user: null };
+let communityData = { posts: [], replies: [], gigs: [], musicians: [], tracks: [], comments: [], profile: {}, adminProfile: null, user: null };
+let chatMembershipLoaded = false;
+let chatJoined = false;
+let chatMembers = [];
+let chatMembershipLastFetched = 0;
+let chatSummaryLastFetched = 0;
+let activeDirectChatId = null;
+let renderedChatKey = '';
+let renderedChatSignature = '';
+let chatMessageLoadToken = 0;
 let communityCall = null;
 let callInboxTimer = null;
 let callEventsTimer = null;
@@ -49,9 +59,41 @@ setPreferredLanguage(savedLanguage || (['en', 'es', 'fr', 'pt', 'sw'].includes(b
 
 function setStep(name) {
 	if (!loginView) return;
-	Object.entries(steps).forEach(([key, section]) => { if (section) section.hidden = key !== name; });
+	Object.entries(steps).forEach(([key, section]) => {
+		if (!section) return;
+		section.hidden = key !== name;
+		section.classList.remove('auth-step-enter');
+		if (key === name) requestAnimationFrame(() => {
+			if (!section.hidden) section.classList.add('auth-step-enter');
+		});
+	});
+	const modeSwitch = byId('authModeSwitch');
+	if (modeSwitch) {
+		modeSwitch.hidden = name !== 'login' && name !== 'signup';
+		for (const button of modeSwitch.querySelectorAll('[data-auth-mode]')) {
+			button.setAttribute('aria-pressed', String(button.dataset.authMode === name));
+		}
+	}
 	loginView.hidden = false;
 	if (appView) appView.hidden = true;
+}
+
+function startRecoveryResendCooldown() {
+	const button = byId('resendRecoveryButton');
+	if (!button) return;
+	if (recoveryResendTimer) clearTimeout(recoveryResendTimer);
+	button.disabled = true;
+	recoveryResendTimer = setTimeout(() => {
+		button.disabled = false;
+		recoveryResendTimer = null;
+	}, 60_000);
+}
+
+function clearRecoveryResendCooldown() {
+	if (recoveryResendTimer) clearTimeout(recoveryResendTimer);
+	recoveryResendTimer = null;
+	const button = byId('resendRecoveryButton');
+	if (button) button.disabled = false;
 }
 
 function formatAccountDate(value) {
@@ -62,13 +104,70 @@ function formatAccountDate(value) {
 }
 
 function roleLabel(role) {
-	const label = role === 'admin' ? 'Admin' : role === 'staff' ? 'Customer service' : 'Musician';
+	const label = role === 'admin' ? 'Admin' : role === 'staff' ? 'Customer service' : 'Member';
 	return window.MWLocale?.translate(label) || label;
 }
 
 function memberTypeLabel(type) {
-	const label = ({ singer: 'Singer / vocalist', instrumentalist: 'Instrumentalist', seller: 'Instrument and gear seller' })[type] || 'Musician';
+	const label = ({ viewer: 'Viewer', singer: 'Singer / vocalist', instrumentalist: 'Instrumentalist', seller: 'Instrument and gear seller' })[type] || 'Viewer';
 	return window.MWLocale?.translate(label) || label;
+}
+
+function updateMemberDashboard(user, profile = {}) {
+	if (!user || user.role !== 'viewer') return;
+	const musician = ['singer', 'instrumentalist', 'seller'].includes(profile.member_type);
+	const dashboard = byId('userDashboard');
+	if (dashboard) dashboard.dataset.memberKind = musician ? 'musician' : 'viewer';
+
+	const content = musician ? {
+		label: 'Musician',
+		tab: 'Musician dashboard',
+		description: 'Share your music, meet collaborators, find gigs, and grow your musician profile.',
+		access: 'Musician',
+		roleDescription: 'Member access: discover, share, listen, and connect.',
+		actions: [
+			{ tab: 'listen', title: 'Share your sound', description: 'Publish a track for the community.' },
+			{ tab: 'gigs', title: 'Find your next stage', description: 'Explore gigs and collaborations.' },
+			{ tab: 'musicians', title: 'Build your profile', description: 'Show the community what you play.' },
+		],
+	} : {
+		label: 'Viewer',
+		tab: 'Viewer dashboard',
+		description: 'Discover music, meet musicians, explore opportunities, and join community conversations.',
+		access: 'Viewer',
+		roleDescription: 'Member access: discover, share, listen, and connect.',
+		actions: [
+			{ tab: 'feed', title: 'Join the conversation', description: 'Share ideas and connect with members.' },
+			{ tab: 'listen', title: 'Discover new music', description: 'Listen to tracks from the community.' },
+			{ tab: 'gigs', title: 'Explore opportunities', description: 'Browse gigs and collaborations.' },
+		],
+	};
+	const translate = (text) => window.MWLocale?.translate(text) || text;
+	const roleBadge = byId('roleBadge');
+	if (roleBadge) {
+		roleBadge.textContent = translate(content.label);
+		roleBadge.title = musician ? 'Musician community member' : 'Viewer community member';
+	}
+	const roleDescription = byId('roleDescription');
+	if (roleDescription) roleDescription.textContent = translate(content.roleDescription);
+	const dashboardTab = byId('personalDashboardTab');
+	if (dashboardTab) dashboardTab.textContent = translate(content.tab);
+	const eyebrow = byId('personalDashboardEyebrow');
+	if (eyebrow) eyebrow.textContent = translate(content.tab);
+	const description = byId('personalDashboardDescription');
+	if (description) description.textContent = translate(content.description);
+	const access = byId('userDashboardRole');
+	if (access) access.textContent = translate(content.access);
+	const cards = document.querySelectorAll('#userDashboard .dashboard-action-card');
+	content.actions.forEach((action, index) => {
+		const card = cards[index];
+		if (!card) return;
+		card.dataset.openCommunityTab = action.tab;
+		const title = card.querySelector('strong');
+		const detail = card.querySelector('small');
+		if (title) title.textContent = translate(action.title);
+		if (detail) detail.textContent = translate(action.description);
+	});
 }
 
 function avatarIcon(preset) {
@@ -192,25 +291,36 @@ function initializeHeroPromoCarousel() {
 			list.scrollBy({ left: direction * (card?.getBoundingClientRect().width || list.clientWidth), behavior: 'smooth' });
 		});
 	}
-	byId('heroVideoSkip')?.addEventListener('click', () => {
-		byId('heroPromoCarousel')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-	});
 }
 
 initializeHeroPromoCarousel();
 
-function activateHeroVideo() {
-	const video = byId('heroLiveVideo');
-	if (!video || document.hidden || !appView || appView.hidden || byId('community')?.hidden) return;
-	if (video.tagName === 'IFRAME') {
-		video.contentWindow?.postMessage(JSON.stringify({ event: 'command', func: 'playVideo', args: '' }), 'https://www.youtube-nocookie.com');
-		return;
-	}
-	video.muted = true;
-	video.loop = true;
-	const playback = video.play();
-	if (playback) playback.catch(() => { video.controls = true; });
+function initializeWorkspaceHeaderMenu() {
+	const toggle = byId('headerMenuToggle');
+	const panel = byId('workspaceHeaderTools');
+	if (!toggle || !panel) return;
+
+	let compact = null;
+	const synchronize = () => {
+		const isCompact = window.matchMedia('(max-width: 1100px)').matches;
+		toggle.hidden = !isCompact;
+		if (isCompact !== compact) {
+			panel.classList.remove('menu-expanded');
+			toggle.setAttribute('aria-expanded', 'false');
+			compact = isCompact;
+		}
+	};
+
+	toggle.addEventListener('click', () => {
+		const expanded = toggle.getAttribute('aria-expanded') === 'true';
+		panel.classList.toggle('menu-expanded', !expanded);
+		toggle.setAttribute('aria-expanded', String(!expanded));
+	});
+	window.addEventListener('resize', synchronize);
+	synchronize();
 }
+
+initializeWorkspaceHeaderMenu();
 
 function initializeConcertGallery() {
 	const gallery = byId('concertGalleryTrack');
@@ -303,102 +413,9 @@ function initializeConcertGallery() {
 	next.addEventListener('click', () => showCard((activeIndex() + 1) % cards.length));
 	gallery.addEventListener('scroll', updateDots, { passive: true });
 	updateDots();
-
-	let timer = 0;
-	const pause = () => window.clearInterval(timer);
-	const resume = () => {
-		pause();
-		if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-			timer = window.setInterval(() => {
-				if (document.hidden || gallery.matches(':hover') || gallery.contains(document.activeElement)) return;
-				showCard((activeIndex() + 1) % cards.length);
-			}, 6000);
-		}
-	};
-	gallery.addEventListener('pointerenter', pause);
-	gallery.addEventListener('pointerleave', resume);
-	gallery.addEventListener('focusin', pause);
-	gallery.addEventListener('focusout', (event) => {
-		if (!gallery.contains(event.relatedTarget)) resume();
-	});
-	document.addEventListener('visibilitychange', () => { if (document.hidden) pause(); else resume(); });
-	resume();
 }
 
 initializeConcertGallery();
-
-const musicQuotes = [
-	'Music turns the spaces between us into a place to belong.',
-	'Every voice carries a world; together, we make a song.',
-	'One shared rhythm can make strangers feel like family.',
-	'Keep creating. Somewhere, your next song is already finding its people.',
-	'A song can travel farther than the person who first imagined it.',
-	'Practice is a quiet promise to the music you have not made yet.',
-	'The best collaborations begin with curiosity and a little courage.',
-	'Every instrument has a story. Playing together lets those stories meet.',
-	'Create the sound you wish you could hear in the world.',
-	'A melody can make a new place feel familiar.',
-	'Your next favorite sound may come from someone you have not met.',
-	'Music grows brighter when we make room for every voice.',
-	'An imperfect first note is still the start of a song.',
-	'Some bridges are built one chorus at a time.',
-	'Share what you make; someone out there needs to hear it.',
-	'The stage is bigger when we invite each other onto it.',
-	'Rhythm reminds us that different parts can move as one.',
-	'Make time for the music that makes you feel more like yourself.',
-];
-
-let musicQuoteTimer = null;
-let advanceMusicQuote = () => {};
-
-function initializeMusicQuote() {
-	const popup = byId('musicQuotePopup');
-	const quote = byId('musicQuoteText');
-	if (!popup || !quote || popup.dataset.initialized) return;
-	popup.dataset.initialized = 'true';
-	let index = Math.floor(Math.random() * musicQuotes.length);
-	const counter = byId('musicQuoteCount');
-	const renderQuote = () => {
-		quote.textContent = window.MWLocale?.translate(musicQuotes[index]) || musicQuotes[index];
-		if (counter) counter.textContent = `${String(index + 1).padStart(2, '0')} / ${musicQuotes.length}`;
-	};
-	popup.addEventListener('mouseenter', () => window.clearInterval(musicQuoteTimer));
-	popup.addEventListener('mouseleave', startMusicQuoteRotation);
-	popup.addEventListener('focusin', () => window.clearInterval(musicQuoteTimer));
-	popup.addEventListener('focusout', (event) => {
-		if (!popup.contains(event.relatedTarget)) startMusicQuoteRotation();
-	});
-	byId('musicQuoteClose')?.addEventListener('click', () => {
-		popup.hidden = true;
-		window.clearInterval(musicQuoteTimer);
-		musicQuoteTimer = null;
-	});
-	advanceMusicQuote = () => {
-		index = (index + 1) % musicQuotes.length;
-		renderQuote();
-	};
-	byId('musicQuoteNext')?.addEventListener('click', advanceMusicQuote);
-	renderQuote();
-}
-
-function startMusicQuoteRotation() {
-	const popup = byId('musicQuotePopup');
-	if (!popup || popup.hidden || document.hidden || popup.matches(':hover') || popup.contains(document.activeElement)) return;
-	window.clearInterval(musicQuoteTimer);
-	musicQuoteTimer = window.setInterval(advanceMusicQuote, 12_000);
-}
-
-document.addEventListener('visibilitychange', () => {
-	if (document.hidden) {
-		window.clearInterval(musicQuoteTimer);
-		musicQuoteTimer = null;
-	} else {
-		activateHeroVideo();
-		startMusicQuoteRotation();
-	}
-});
-
-initializeMusicQuote();
 
 document.querySelectorAll('#introLanguage, #headerLanguage, #profileLanguage').forEach((select) => select.addEventListener('change', async () => {
 	if (!currentAccount) languageChosenBeforeSignIn = true;
@@ -552,7 +569,10 @@ function openWorldTab(tab) {
 }
 
 function handleGoogleCredential(response) {
-	const messageId = byId('signupStep').hidden ? 'googleLoginMessage' : 'googleSignupMessage';
+	const optionsDialog = byId('accountOptionsDialog');
+	const messageId = optionsDialog?.open
+		? 'accountOptionsGoogleMessage'
+		: byId('signupStep').hidden ? 'googleLoginMessage' : 'googleSignupMessage';
 	(async () => {
 		try {
 			const countryCode = byId('signupCountry')?.value || '';
@@ -582,9 +602,28 @@ function handleGoogleCredential(response) {
 function initializeGoogleSignIn(clientId) {
 	if (!loginView) return;
 	googleSignInClientId = clientId;
-	const sections = [byId('googleSignInSection'), byId('googleSignupSection')];
+	const sections = [byId('googleSignInSection'), byId('googleSignupSection')].filter(Boolean);
 	sections.forEach((section) => { section.hidden = !clientId; });
-	if (!clientId) return;
+	const optionsSection = byId('accountOptionsGoogleSection');
+	const optionsButton = byId('accountOptionsGoogleButton');
+	const optionsFallback = byId('accountOptionsGoogleFallback');
+	const optionsNote = byId('accountOptionsGoogleNote');
+	if (optionsSection) optionsSection.hidden = false;
+	if (optionsFallback) {
+		optionsFallback.hidden = false;
+		optionsFallback.disabled = true;
+	}
+	if (!clientId) {
+		if (optionsNote) {
+			optionsNote.textContent = 'Google sign-in is not configured for this site yet.';
+			optionsNote.hidden = false;
+		}
+		return;
+	}
+	if (optionsNote) {
+		optionsNote.textContent = 'Loading Google sign-in…';
+		optionsNote.hidden = false;
+	}
 
 	const script = document.createElement('script');
 	script.src = 'https://accounts.google.com/gsi/client';
@@ -600,13 +639,23 @@ function initializeGoogleSignIn(clientId) {
 		window.google.accounts.id.initialize({ client_id: googleSignInClientId, nonce: googleSignInNonce, callback: handleGoogleCredential });
 		window.google.accounts.id.renderButton(byId('googleSignInButton'), { theme: 'outline', size: 'large', text: 'continue_with', shape: 'rectangular', width: buttonWidth });
 		window.google.accounts.id.renderButton(byId('googleSignupButton'), { theme: 'outline', size: 'large', text: 'continue_with', shape: 'rectangular', width: buttonWidth });
+		if (optionsButton) {
+			optionsButton.hidden = false;
+			window.google.accounts.id.renderButton(optionsButton, { theme: 'outline', size: 'large', text: 'continue_with', shape: 'rectangular', width: buttonWidth });
+		}
+		if (optionsFallback) optionsFallback.hidden = true;
+		if (optionsNote) optionsNote.hidden = true;
 	};
 	script.onerror = () => {
 		sections.forEach((section) => {
 			section.hidden = false;
-			const message = section.id === 'googleSignInSection' ? 'googleLoginMessage' : 'googleSignupMessage';
-			showMessage(message, 'Google sign-in could not be loaded. Please try again later.');
+			showMessage(section.id === 'googleSignInSection' ? 'googleLoginMessage' : 'googleSignupMessage', 'Google sign-in could not be loaded. Please try again later.');
 		});
+		if (optionsFallback) optionsFallback.hidden = false;
+		if (optionsNote) {
+			optionsNote.textContent = 'Google sign-in could not be loaded. Please try again later.';
+			optionsNote.hidden = false;
+		}
 	};
 	document.head.append(script);
 }
@@ -618,29 +667,19 @@ async function savePassword(values, checkboxId) {
 
 function openWorkspace(user) {
 	if (mobileMode && loginView) {
-		location.replace('/world.html?mobile=1');
+		location.replace(buildWorkspaceUrl(readWorkspaceRoute(new URLSearchParams(location.search)), true));
 		return;
 	}
 	if (!appView) {
 		location.replace('/world.html');
 		return;
 	}
+	const accountOptionsDialog = byId('accountOptionsDialog');
+	if (accountOptionsDialog?.open) accountOptionsDialog.close();
 	currentAccount = user;
 	updateSeasonalTheme(user);
-	byId('welcomeSplash')?.setAttribute('hidden', '');
-	window.clearInterval(splashProgressTimer);
-	splashProgressTimer = null;
 	if (loginView) loginView.hidden = true;
 	appView.hidden = false;
-	activateHeroVideo();
-	initializeMusicQuote();
-	window.setTimeout(() => {
-		const quotePopup = byId('musicQuotePopup');
-		if (quotePopup) {
-			quotePopup.hidden = false;
-			startMusicQuoteRotation();
-		}
-	}, 900);
 	if (!loginView && byId('worldOpenLink')) byId('worldOpenLink').hidden = true;
 	history.replaceState(null, '', `${location.pathname}${location.search}`);
 	window.scrollTo(0, 0);
@@ -658,9 +697,9 @@ function openWorkspace(user) {
 	byId('userDashboardName').textContent = user.name;
 	byId('userDashboardUsername').textContent = user.username;
 	byId('userDashboardRole').textContent = roleLabel(user.role);
-	byId('dashboardGreetingName').textContent = String(user.name || 'creator').trim().split(/\s+/)[0] || 'creator';
+	if (byId('dashboardGreetingName')) byId('dashboardGreetingName').textContent = String(user.name || 'creator').trim().split(/\s+/)[0] || 'creator';
 	byId('listeningRoomName').textContent = `${user.name}'s listening room`;
-	byId('personalDashboardEyebrow').textContent = user.role === 'admin' ? 'Administrator workspace' : user.role === 'staff' ? 'Community staff workspace' : 'Musician workspace';
+	byId('personalDashboardEyebrow').textContent = user.role === 'admin' ? 'Administrator workspace' : user.role === 'staff' ? 'Community staff workspace' : 'Member workspace';
 	byId('personalDashboardDescription').textContent = user.role === 'admin' ? 'Manage your own member profile here. Use the Account details tab for administrator account management.' : user.role === 'staff' ? 'See your member details and take part in the global musician community.' : 'See your member details and explore opportunities, collaborations, and music from around the world.';
 	byId('dashboardDate').textContent = new Intl.DateTimeFormat(undefined, { dateStyle: 'full' }).format(new Date());
 	if (user.role === 'admin') {
@@ -673,15 +712,18 @@ function openWorkspace(user) {
 	const listingSubmit = byId('marketplaceForm')?.querySelector('[type="submit"]');
 	if (listingSubmit) listingSubmit.disabled = !shopCurrency;
 	const dashboardParams = new URLSearchParams(location.search);
-	const requestedView = dashboardParams.get('view');
+	const route = readWorkspaceRoute(dashboardParams);
+	const requestedView = route.view;
 	const paymentReturn = dashboardParams.get('marketplace') === 'payment';
 	selectDashboardTab(requestedView === 'community' || paymentReturn ? 'community' : requestedView === 'account' ? 'accountServices' : 'userDashboard');
-	const requestedCommunityTab = dashboardParams.get('tab') || (paymentReturn ? 'marketplace' : '');
-	if (['feed', 'gigs', 'musicians', 'listen', 'chat', 'marketplace'].includes(requestedCommunityTab)) {
+	const requestedCommunityTab = route.tab || (paymentReturn ? 'marketplace' : '');
+	if (['feed', 'gigs', 'musicians', 'listen', 'chat', 'marketplace', 'aboutAdmin'].includes(requestedCommunityTab)) {
 		selectCommunityTab(requestedCommunityTab);
 		if (requestedCommunityTab === 'chat') {
-			void loadChatMessages();
-			void refreshChatRoomSummaries();
+			void loadChatMembership().then(() => {
+				void loadChatMessages();
+				void refreshChatRoomSummaries();
+			});
 		}
 	}
 	if (requestedView === 'community' && dashboardParams.get('action') === 'post') {
@@ -704,7 +746,36 @@ function openWorkspace(user) {
 		if (!window.adminApprovalTimer) window.adminApprovalTimer = setInterval(() => { void loadApprovals(); }, 30_000);
 		if (!window.adminActivityTimer) window.adminActivityTimer = setInterval(() => { void loadAdminActivity(); }, 60_000);
 	}
-	if (!window.chatRefreshTimer) window.chatRefreshTimer = setInterval(() => { void loadChatMessages(); }, 12_000);
+	if (!window.chatRefreshTimer) window.chatRefreshTimer = setInterval(() => {
+		void loadChatMessages();
+		if (chatJoined && Date.now() - chatMembershipLastFetched >= 30_000) void loadChatMembership();
+	}, 3_000);
+}
+
+document.addEventListener('visibilitychange', () => {
+	if (document.visibilityState === 'visible') void loadChatMessages();
+});
+
+function readWorkspaceRoute(params) {
+	const requestedView = params.get('view') || params.get('nextView');
+	const view = ['dashboard', 'community', 'account'].includes(requestedView) ? requestedView : 'dashboard';
+	const requestedTab = params.get('tab') || params.get('nextTab');
+	const tab = ['feed', 'gigs', 'musicians', 'listen', 'chat', 'marketplace', 'aboutAdmin'].includes(requestedTab) ? requestedTab : '';
+	return { view, tab: view === 'community' ? tab : '' };
+}
+
+function buildWorkspaceUrl(route, mobile = false) {
+	const params = new URLSearchParams({ view: route.view });
+	if (mobile) params.set('mobile', '1');
+	if (route.tab) params.set('tab', route.tab);
+	return `/world.html?${params}`;
+}
+
+function signInUrl() {
+	const route = readWorkspaceRoute(new URLSearchParams(location.search));
+	const params = new URLSearchParams({ nextView: route.view });
+	if (route.tab) params.set('nextTab', route.tab);
+	return `${mobileMode ? '/mobile' : '/'}?${params}`;
 }
 
 function updateAdminPresenceClock() {
@@ -716,48 +787,103 @@ function updateAdminPresenceClock() {
 	clock.textContent = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit', second: '2-digit' }).format(now);
 }
 
-document.querySelectorAll('[data-enter-site]').forEach((button) => button.addEventListener('click', () => {
-	if (button.disabled) return;
+function setSplashPhase(phase) {
 	const splash = byId('welcomeSplash');
-	if (splash) splash.hidden = true;
-	window.clearInterval(splashProgressTimer);
-	requestAnimationFrame(() => byId('username')?.focus());
-}));
+	if (!splash) return;
+	splash.dataset.phase = phase;
+	const status = byId('splashStatus');
+	const progress = byId('splashProgressTrack');
+	const continueButton = byId('splashContinue');
+	const retryButton = byId('splashRetry');
+	const messages = {
+		loading: 'Please wait while we prepare your music community.',
+		ready: 'Thanks for waiting — your music community is ready.',
+		error: 'We could not connect just now. Retry, or continue to sign in.'
+	};
+	if (status) status.textContent = messages[phase];
+	if (progress) {
+		progress.setAttribute('aria-valuetext', phase === 'ready' ? 'Your session is ready' : phase === 'error' ? 'Connection failed' : 'Preparing your secure session');
+		if (phase === 'ready' || phase === 'error') progress.setAttribute('aria-valuenow', '100');
+		else progress.removeAttribute('aria-valuenow');
+	}
+	if (continueButton) {
+		continueButton.disabled = phase === 'loading';
+		continueButton.setAttribute('aria-busy', String(phase === 'loading'));
+		const label = continueButton.firstChild;
+		if (label?.nodeType === Node.TEXT_NODE) label.textContent = phase === 'loading' ? 'Preparing your welcome ' : phase === 'error' ? 'Continue to sign in ' : 'Continue ';
+		const icon = continueButton.querySelector('span');
+		if (icon) icon.textContent = phase === 'loading' ? '♪' : '→';
+	}
+	if (retryButton) retryButton.hidden = phase !== 'error';
+}
 
-function initializeSplashProgress() {
+async function continueFromWelcome() {
+	const splash = byId('welcomeSplash');
+	if (!splash || splash.dataset.phase === 'loading') return;
+	if (currentAccount) {
+		setSplashPhase('loading');
+		try {
+			await request('logout', 'POST');
+			currentAccount = null;
+			signingKey = null;
+			await loadState();
+			setStep(initialSetupRequired ? 'setup' : 'login');
+			splash.hidden = true;
+			if (!initialSetupRequired) {
+				showMessage('loginMessage', 'You have been signed out. Sign in or create an account to continue.', true);
+				requestAnimationFrame(() => byId('username')?.focus());
+			}
+		} catch (error) {
+			setSplashPhase('error');
+			const status = byId('splashStatus');
+			if (status) status.textContent = error.message;
+		}
+		return;
+	}
+	splash.hidden = true;
+	if (!loginView) return;
+	if (initialSetupRequired) {
+		setStep('setup');
+		requestAnimationFrame(() => byId('setupName')?.focus());
+		return;
+	}
+	setStep('login');
+	requestAnimationFrame(() => byId('username')?.focus());
+}
+
+byId('showAccountOptionsButton')?.addEventListener('click', () => {
+	const dialog = byId('accountOptionsDialog');
+	if (dialog && !dialog.open) dialog.showModal();
+});
+
+document.querySelectorAll('[data-enter-site]').forEach((button) => button.addEventListener('click', continueFromWelcome));
+byId('splashRetry')?.addEventListener('click', () => { void loadState(); });
+byId('accountEmailButton')?.addEventListener('click', () => {
+	byId('accountOptionsDialog')?.close();
+	setStep('login');
+	requestAnimationFrame(() => byId('username')?.focus());
+});
+byId('accountCreateButton')?.addEventListener('click', () => {
+	byId('accountOptionsDialog')?.close();
+	setStep('signup');
+	requestAnimationFrame(() => byId('signupName')?.focus());
+});
+byId('accountOptionsCancel')?.addEventListener('click', () => byId('accountOptionsDialog')?.close());
+
+function initializeSplash() {
 	const splash = byId('welcomeSplash');
 	const continueButton = splash?.querySelector('[data-enter-site]');
-	const progress = byId('splashProgress');
-	const progressTrack = byId('splashProgressTrack');
-	const announcement = byId('splashProgressAnnouncement');
-	if (!splash || !continueButton || !progress || !progressTrack) return;
+	if (!splash || !continueButton) return;
 	const requestedCommunityTab = new URLSearchParams(location.search).get('tab');
-	const directCommunityTab = ['feed', 'gigs', 'musicians', 'listen', 'chat', 'marketplace'].includes(requestedCommunityTab);
+	const directCommunityTab = ['feed', 'gigs', 'musicians', 'listen', 'chat', 'marketplace', 'aboutAdmin'].includes(requestedCommunityTab);
 	if (location.hash === '#signin' || new URLSearchParams(location.search).get('signup') === '1' || directCommunityTab) {
 		splash.hidden = true;
 		return;
 	}
-	const duration = 6_000;
-	const startedAt = performance.now();
-	progress.max = duration / 1000;
-	const update = () => {
-		const elapsed = Math.min(duration, performance.now() - startedAt);
-		progress.value = elapsed / 1000;
-		progressTrack.style.setProperty('--progress', `${elapsed / duration * 100}%`);
-		if (elapsed < duration) {
-			return;
-		}
-		window.clearInterval(splashProgressTimer);
-		splashProgressTimer = null;
-		continueButton.disabled = false;
-		if (announcement) announcement.textContent = window.MWLocale?.translate('You can continue now.') || 'You can continue now.';
-	};
-	continueButton.disabled = true;
-	update();
-	splashProgressTimer = window.setInterval(update, 100);
+	setSplashPhase('loading');
 }
 
-initializeSplashProgress();
+initializeSplash();
 
 function selectCommunityTab(name) {
 	for (const button of document.querySelectorAll('[data-community-tab]')) {
@@ -781,7 +907,6 @@ function selectDashboardTab(name) {
 		const panel = byId(panelId);
 		if (panel) panel.hidden = panelId !== selectedPanel;
 	}
-	if (selectedPanel === 'community') activateHeroVideo();
 }
 
 function initials(name) {
@@ -971,7 +1096,7 @@ function renderCommunity() {
 		if (input && document.activeElement !== input) input.value = communityData.profile?.[key] || (field === 'profileCountry' ? detectedCountry : '');
 	}
 	const memberType = byId('profileMemberType');
-	if (memberType && document.activeElement !== memberType) memberType.value = communityData.profile?.member_type || 'singer';
+	if (memberType && document.activeElement !== memberType) memberType.value = communityData.profile?.member_type || 'viewer';
 	const language = byId('profileLanguage');
 	if (language && document.activeElement !== language) language.value = communityData.profile?.language || 'en';
 	const preset = communityData.profile?.avatar_preset || 'guitar';
@@ -983,6 +1108,7 @@ function renderCommunity() {
 	byId('profileLongitude').value = communityData.profile?.longitude ?? '';
 	renderProfileAvatar();
 	renderAdminProfile();
+	renderAdminPublicProfile();
 }
 
 function renderMusicianDirectory() {
@@ -1049,6 +1175,7 @@ function renderMusicianDirectory() {
 async function loadCommunity() {
 	try {
 		communityData = await request('community', 'GET');
+		updateMemberDashboard(communityData.user || currentAccount, communityData.profile);
 		if (communityData.profile?.language) {
 			if (languageChosenBeforeSignIn && currentAccount) {
 				const language = localStorage.getItem('mw-language') || communityData.profile.language;
@@ -1247,7 +1374,31 @@ function renderAdminProfile() {
 	if (removeLabel) removeLabel.hidden = !profile.has_avatar;
 }
 
+function renderAdminPublicProfile() {
+	const profile = communityData.adminProfile;
+	const card = byId('adminPublicProfileCard');
+	const empty = byId('adminPublicProfileEmpty');
+	if (!card || !empty) return;
+	card.hidden = !profile;
+	empty.hidden = Boolean(profile);
+	if (!profile) return;
+
+	const name = profile.name || 'Musicians World admin';
+	byId('adminPublicName').textContent = name;
+	byId('adminPublicBio').textContent = profile.bio || 'The administrator has not shared a public introduction yet.';
+	const avatar = byId('adminPublicAvatar');
+	avatar.replaceChildren();
+	avatar.textContent = initials(name) || 'MW';
+	if (profile.hasAvatar && profile.id) {
+		const image = document.createElement('img');
+		image.src = `/api?action=member-avatar&id=${encodeURIComponent(profile.id)}`;
+		image.alt = `${name}'s profile picture`;
+		avatar.replaceChildren(image);
+	}
+}
+
 const communityChatRooms = {
+	general: { title: 'General chat', description: 'Talk with everyone in the community', icon: '🌍', prompts: ['Say hello to the community', 'What are you listening to today?'] },
 	singers: { title: 'Singers and vocalists', description: 'Share your voice and ideas', icon: '🎤', prompts: ['Introduce yourself', 'What are you working on?'] },
 	instrumentalists: { title: 'Instrumentalists', description: 'Find players and collaborators', icon: '🎸', prompts: ['Introduce yourself and your instrument', 'Who would you like to collaborate with?'] },
 	marketplace: { title: 'Instrument and gear', description: 'Discuss instruments, equipment, and listings', icon: '🎹', prompts: ['What gear are you looking for?', 'Share a tip about your setup'] },
@@ -1266,6 +1417,9 @@ function isChatRoomOpen() {
 function selectChatRoom(room) {
 	const selectedRoom = communityChatRooms[room];
 	if (!selectedRoom) return;
+	activeDirectChatId = null;
+	const voiceButton = byId('voiceRecordButton');
+	if (voiceButton) voiceButton.hidden = false;
 	const select = byId('chatRoomSelect');
 	if (select) select.value = room;
 	for (const button of document.querySelectorAll('[data-chat-room]')) {
@@ -1275,6 +1429,10 @@ function selectChatRoom(room) {
 		const roomDetails = communityChatRooms[button.dataset.chatRoom];
 		const summary = button.querySelector('.chat-room-copy small');
 		if (summary && roomDetails) summary.textContent = window.MWLocale?.translate(roomDetails.description) || roomDetails.description;
+	}
+	for (const button of document.querySelectorAll('[data-direct-chat-id]')) {
+		button.classList.remove('active');
+		button.setAttribute('aria-pressed', 'false');
 	}
 	const title = byId('chatRoomTitle');
 	if (title) title.textContent = window.MWLocale?.translate(selectedRoom.title) || selectedRoom.title;
@@ -1302,8 +1460,145 @@ function selectChatRoom(room) {
 	}
 }
 
+function renderChatContacts() {
+	const list = byId('chatContacts');
+	const count = byId('chatMemberCount');
+	if (!list) return;
+	const contacts = chatMembers.filter((member) => Number(member.id) !== Number(communityData.user?.id || currentAccount?.id));
+	if (count) count.textContent = contacts.length.toLocaleString();
+	list.replaceChildren();
+	if (!contacts.length) {
+		addText(list, 'p', 'community-empty', 'You are the first member here. Invite others to join chat.');
+		return;
+	}
+	for (const member of contacts) {
+		const button = document.createElement('button');
+		button.type = 'button';
+		button.className = 'chat-contact-button';
+		button.dataset.directChatId = String(member.id);
+		button.setAttribute('aria-pressed', String(Number(member.id) === activeDirectChatId));
+		if (Number(member.id) === activeDirectChatId) button.classList.add('active');
+		const avatar = addText(button, 'span', 'chat-contact-avatar', String(member.name || '?').trim().split(/\s+/).slice(0, 2).map((part) => part[0] || '').join('').toUpperCase() || '?');
+		avatar.setAttribute('aria-hidden', 'true');
+		const copy = document.createElement('span');
+		copy.className = 'chat-contact-copy';
+		addText(copy, 'strong', '', member.name);
+		addText(copy, 'small', '', memberTypeLabel(member.memberType));
+		button.append(copy);
+		button.addEventListener('click', () => selectDirectChat(member));
+		list.append(button);
+	}
+}
+
+function selectDirectChat(member) {
+	activeDirectChatId = Number(member.id);
+	const voiceButton = byId('voiceRecordButton');
+	if (voiceButton) voiceButton.hidden = true;
+	for (const button of document.querySelectorAll('[data-chat-room]')) {
+		button.classList.remove('active');
+		button.setAttribute('aria-pressed', 'false');
+	}
+	for (const button of document.querySelectorAll('[data-direct-chat-id]')) {
+		const selected = Number(button.dataset.directChatId) === activeDirectChatId;
+		button.classList.toggle('active', selected);
+		button.setAttribute('aria-pressed', String(selected));
+	}
+	if (byId('chatRoomTitle')) byId('chatRoomTitle').textContent = member.name;
+	if (byId('chatRoomAvatar')) byId('chatRoomAvatar').textContent = String(member.name || '?').trim().split(/\s+/).slice(0, 2).map((part) => part[0] || '').join('').toUpperCase() || '?';
+	if (byId('chatRoomDescription')) byId('chatRoomDescription').textContent = 'Private conversation';
+	byId('chatRoomSuggestions')?.replaceChildren();
+	if (byId('chatCallPanel')) byId('chatCallPanel').hidden = true;
+	void loadChatMessages();
+}
+
+async function loadChatMembership() {
+	const panel = byId('chatMembershipPanel');
+	const card = byId('chatCard');
+	if (!panel || !card) return;
+	const previousDirectChatId = activeDirectChatId;
+	const joinButton = byId('joinCommunityChatButton');
+	const retryButton = byId('retryChatMembershipButton');
+	if (joinButton) joinButton.disabled = true;
+	if (retryButton) retryButton.hidden = true;
+	try {
+		const state = await request('community-chat-membership', 'GET');
+		chatMembershipLastFetched = Date.now();
+		chatMembershipLoaded = true;
+		chatJoined = Boolean(state.joined);
+		chatMembers = chatJoined ? state.members || [] : [];
+		if (!chatJoined) {
+			activeDirectChatId = null;
+			panel.hidden = false;
+			card.hidden = true;
+			showMessage('chatMembershipStatus', 'Community chat is optional. Join to read and send messages.');
+			if (joinButton) {
+				joinButton.hidden = false;
+				joinButton.disabled = false;
+			}
+			renderChatContacts();
+			return;
+		}
+		panel.hidden = true;
+		card.hidden = false;
+		if (joinButton) joinButton.hidden = true;
+		renderChatContacts();
+		const previousDirectMember = chatMembers.find((member) => Number(member.id) === previousDirectChatId);
+		if (previousDirectMember) selectDirectChat(previousDirectMember);
+		else selectChatRoom(communityChatRooms[byId('chatRoomSelect')?.value] ? byId('chatRoomSelect').value : 'general');
+	} catch (error) {
+		chatMembershipLastFetched = 0;
+		chatMembershipLoaded = false;
+		chatJoined = false;
+		chatMembers = [];
+		panel.hidden = false;
+		card.hidden = true;
+		showMessage('chatMembershipStatus', error.message);
+		if (joinButton) {
+			joinButton.hidden = true;
+			joinButton.disabled = true;
+		}
+		if (retryButton) retryButton.hidden = false;
+	}
+}
+
+byId('joinCommunityChatButton')?.addEventListener('click', async (event) => {
+	const button = event.currentTarget;
+	button.disabled = true;
+	try {
+		const result = await request('community-chat-membership', 'POST', { operation: 'join' });
+		showMessage('chatMembershipStatus', result.message, true);
+		await loadChatMembership();
+		if (chatJoined) {
+			selectChatRoom('general');
+			await loadChatMessages();
+			void refreshChatRoomSummaries();
+		}
+	} catch (error) {
+		showMessage('chatMembershipStatus', error.message);
+		button.disabled = false;
+	}
+});
+
+byId('retryChatMembershipButton')?.addEventListener('click', () => { void loadChatMembership(); });
+byId('leaveCommunityChatButton')?.addEventListener('click', async (event) => {
+	if (!confirm('Leave community chat? You can join again later; your saved messages will remain stored.')) return;
+	const button = event.currentTarget;
+	button.disabled = true;
+	try {
+		const result = await request('community-chat-membership', 'POST', { operation: 'leave' });
+		showMessage('chatMembershipStatus', result.message, true);
+		await loadChatMembership();
+	} catch (error) {
+		showMessage('chatRoomStatus', error.message);
+	} finally {
+		button.disabled = false;
+	}
+});
+
 async function refreshChatRoomSummaries(markReadRoom = '') {
-	if (!currentAccount || !byId('chatMessages')) return;
+	if (!currentAccount || !chatJoined || !byId('chatMessages')) return;
+	if (Date.now() - chatSummaryLastFetched < 10_000) return;
+	chatSummaryLastFetched = Date.now();
 	try {
 		const { rooms } = await request('community-room-summaries', 'GET');
 		const activeRoom = byId('chatRoomSelect')?.value;
@@ -1335,6 +1630,7 @@ async function refreshChatRoomSummaries(markReadRoom = '') {
 		const status = byId('chatRoomStatus');
 		if (status) status.textContent = '';
 	} catch (error) {
+		chatSummaryLastFetched = 0;
 		showMessage('chatRoomStatus', error.message);
 	}
 }
@@ -1349,17 +1645,31 @@ document.querySelectorAll('[data-chat-room]').forEach((button) => {
 async function loadChatMessages() {
 	const room = byId('chatRoomSelect')?.value;
 	const list = byId('chatMessages');
-	if (!room || !list || appView?.hidden || !isChatRoomOpen()) return;
-	selectChatRoom(room);
+	if (!room || !list || !chatMembershipLoaded || !chatJoined || appView?.hidden || !isChatRoomOpen()) return;
+	const directChatId = activeDirectChatId;
+	const directMember = directChatId === null ? null : chatMembers.find((member) => Number(member.id) === directChatId);
+	if (directChatId !== null && !directMember) return;
+	if (directChatId === null) selectChatRoom(room);
+	const requestToken = ++chatMessageLoadToken;
 	const wasAtBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 100;
 	try {
-		const { messages } = await request('community-messages', 'GET', { room });
-		if (byId('chatRoomSelect')?.value !== room) return;
+		const { messages } = directChatId === null
+			? await request('community-messages', 'GET', { room })
+			: await request('direct-messages', 'GET', { with: directChatId });
+		if (requestToken !== chatMessageLoadToken || !chatJoined || !isChatRoomOpen() || byId('chatRoomSelect')?.value !== room || activeDirectChatId !== directChatId) return;
+		const chatKey = directChatId === null ? `room:${room}` : `direct:${directChatId}`;
+		const signature = messages.map((message) => message.id).join(',');
+		if (chatKey === renderedChatKey && signature === renderedChatSignature) {
+			if (directChatId === null) void refreshChatRoomSummaries(room);
+			return;
+		}
+		renderedChatKey = chatKey;
+		renderedChatSignature = signature;
 		list.replaceChildren();
 		if (!messages.length) {
-			const roomTitle = window.MWLocale?.translate(communityChatRooms[room].title) || communityChatRooms[room].title;
+			const roomTitle = directMember?.name || (window.MWLocale?.translate(communityChatRooms[room].title) || communityChatRooms[room].title);
 			addText(list, 'p', 'community-empty', `Start the ${roomTitle} conversation. Share an idea or say hello.`);
-			void refreshChatRoomSummaries(room);
+			if (directChatId === null) void refreshChatRoomSummaries(room);
 			return;
 		}
 		for (const message of messages) {
@@ -1382,13 +1692,13 @@ async function loadChatMessages() {
 				const audio = document.createElement('audio');
 				audio.controls = true;
 				audio.preload = 'none';
-				audio.src = `/api?action=community-message-audio&id=${encodeURIComponent(message.id)}`;
+				audio.src = `/api?action=community-message-audio&id=${encodeURIComponent(message.id)}${room === 'general' ? '&room=general' : ''}`;
 				audio.setAttribute('aria-label', `Voice message from ${message.full_name}`);
 				bubble.append(audio);
 			} else addText(bubble, 'p', 'chat-message-body', message.body);
 			bubble.prepend(meta);
 			item.append(bubble);
-			if (Number(message.author_id) !== Number(communityData.user?.id)) {
+			if (directChatId === null && room !== 'general' && Number(message.author_id) !== Number(communityData.user?.id)) {
 				const actions = document.createElement('div');
 				actions.className = 'chat-message-actions';
 				for (const [mediaType, label] of [['audio', 'Voice call'], ['video', 'Video call']]) {
@@ -1404,10 +1714,12 @@ async function loadChatMessages() {
 			list.append(item);
 		}
 		if (wasAtBottom) list.scrollTop = list.scrollHeight;
-		list.setAttribute('aria-label', `${window.MWLocale?.translate(communityChatRooms[room].title) || communityChatRooms[room].title} messages`);
-		void refreshChatRoomSummaries(room);
+		list.setAttribute('aria-label', `${directMember?.name || (window.MWLocale?.translate(communityChatRooms[room].title) || communityChatRooms[room].title)} messages`);
+		if (directChatId === null) void refreshChatRoomSummaries(room);
 	} catch (error) {
-		if (byId('chatRoomSelect')?.value !== room) return;
+		if (requestToken !== chatMessageLoadToken || byId('chatRoomSelect')?.value !== room || activeDirectChatId !== directChatId) return;
+		renderedChatKey = '';
+		renderedChatSignature = '';
 		list.replaceChildren();
 		addText(list, 'p', 'community-empty', error.message);
 	}
@@ -1657,6 +1969,10 @@ async function attachMarketplacePhoto(values, file) {
 
 async function recordVoiceMessage() {
 	const button = byId('voiceRecordButton');
+	if (activeDirectChatId !== null) {
+		showMessage('chatMessageStatus', 'Voice notes are available in community rooms. Private messages currently support text.');
+		return;
+	}
 	if (!button || !navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
 		showMessage('chatMessageStatus', 'Voice recording needs a supported browser and a secure connection (HTTPS or localhost).');
 		return;
@@ -1687,6 +2003,7 @@ async function recordVoiceMessage() {
 			if (blob.size > 1.5 * 1024 * 1024) { showMessage('chatMessageStatus', 'That recording is larger than 1.5 MB. Record a shorter message.'); return; }
 			button.disabled = true;
 			try {
+				if (activeDirectChatId !== null) throw new Error('Voice notes are available in community rooms. Private messages currently support text.');
 				const result = await request('community-voice', 'POST', { room: byId('chatRoomSelect').value, audioMime: blob.type.split(';')[0], audioBase64: await blobToBase64(blob) });
 				showMessage('chatMessageStatus', result.message, true);
 				await loadChatMessages();
@@ -2077,8 +2394,10 @@ document.querySelectorAll('[data-community-tab]').forEach((button) => {
 	button.addEventListener('click', () => {
 		selectCommunityTab(button.dataset.communityTab);
 		if (button.dataset.communityTab === 'chat') {
-			void loadChatMessages();
-			void refreshChatRoomSummaries();
+			void loadChatMembership().then(() => {
+				void loadChatMessages();
+				void refreshChatRoomSummaries();
+			});
 		}
 	});
 });
@@ -2089,8 +2408,10 @@ document.querySelectorAll('[data-open-community-tab]').forEach((button) => {
 		selectDashboardTab('community');
 		selectCommunityTab(tab);
 		if (tab === 'chat') {
-			void loadChatMessages();
-			void refreshChatRoomSummaries();
+			void loadChatMembership().then(() => {
+				void loadChatMessages();
+				void refreshChatRoomSummaries();
+			});
 		}
 		byId(tab === 'chat' ? 'chatTab' : 'community').scrollIntoView({ behavior: 'smooth', block: 'start' });
 	});
@@ -2148,11 +2469,14 @@ byId('chatMessageForm')?.addEventListener('submit', async (event) => {
 	showMessage('chatMessageStatus', '');
 	try {
 		const room = byId('chatRoomSelect').value;
-		const result = await request('community-message', 'POST', { room, body });
+		const directRecipientId = activeDirectChatId;
+		const result = directRecipientId === null
+			? await request('community-message', 'POST', { room, body })
+			: await request('direct-message', 'POST', { recipientId: directRecipientId, body });
 		byId('chatMessageForm').reset();
 		showMessage('chatMessageStatus', result.message, true);
 		await loadChatMessages();
-		await refreshChatRoomSummaries(room);
+		if (directRecipientId === null) await refreshChatRoomSummaries(room);
 	} catch (error) { showMessage('chatMessageStatus', error.message); }
 	finally { button.disabled = false; }
 });
@@ -2234,7 +2558,7 @@ byId('adminProfileForm')?.addEventListener('submit', async (event) => {
 		const values = {
 			location: profile.location || '',
 			country: profile.country || '',
-			memberType: profile.member_type || 'singer',
+			memberType: profile.member_type || 'viewer',
 			avatarPreset: profile.avatar_preset || 'guitar',
 			instruments: profile.instruments || '',
 			genres: profile.genres || '',
@@ -2376,16 +2700,51 @@ async function loadAccount() {
 	}
 }
 
+function renderAdminMemberMetrics(users) {
+	const members = users.filter((user) => user.role === 'viewer');
+	const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+	const timestamp = (value) => {
+		const text = String(value || '');
+		const normalized = /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/.test(text) ? `${text.replace(' ', 'T')}Z` : text;
+		const parsed = Date.parse(normalized);
+		return Number.isFinite(parsed) ? parsed : 0;
+	};
+	const groups = [
+		{ name: 'viewer', matches: (type) => !['singer', 'instrumentalist', 'seller'].includes(type) },
+		{ name: 'artist', matches: (type) => ['singer', 'instrumentalist'].includes(type) },
+		{ name: 'seller', matches: (type) => type === 'seller' }
+	];
+	for (const group of groups) {
+		const groupMembers = members.filter((user) => group.matches(user.member_type || 'viewer'));
+		byId(`${group.name}MemberCount`).textContent = groupMembers.length.toLocaleString();
+		byId(`${group.name}MemberTrend`).textContent = `${window.MWLocale?.translate('New in the last 7 days') || 'New in the last 7 days'}: ${groupMembers.filter((user) => timestamp(user.created_at) >= sevenDaysAgo).length.toLocaleString()}`;
+	}
+	byId('activeMemberCount').textContent = members.filter((user) => timestamp(user.last_sign_in) >= sevenDaysAgo).length.toLocaleString();
+}
+
 async function loadUsers() {
 	try {
 		const result = await request('users', 'GET');
 		currentAccount = result.user;
 		byId('memberCount').textContent = result.users.length.toLocaleString();
+		renderAdminMemberMetrics(result.users);
 		renderUsers(result.users);
+		showMessage('adminMemberMetricsMessage', '');
 	} catch (error) {
 		showMessage('directoryMessage', error.message);
+		showMessage('adminMemberMetricsMessage', error.message);
 	}
 }
+
+byId('refreshUsersButton')?.addEventListener('click', async (event) => {
+	const button = event.currentTarget;
+	button.disabled = true;
+	try {
+		await Promise.all([loadUsers(), loadAdminActivity()]);
+	} finally {
+		button.disabled = false;
+	}
+});
 
 async function loadAdminActivity() {
 	try {
@@ -2552,7 +2911,7 @@ function renderUsers(users) {
 			const roleSelect = document.createElement('select');
 			roleSelect.className = 'role-select';
 			roleSelect.setAttribute('aria-label', `Role for ${user.name}`);
-			for (const [value, label] of [['viewer', 'Musician'], ['staff', 'Staff'], ['admin', 'Admin']]) roleSelect.add(new Option(label, value));
+			for (const [value, label] of [['viewer', 'Member'], ['staff', 'Staff'], ['admin', 'Admin']]) roleSelect.add(new Option(label, value));
 			roleSelect.value = user.role;
 			const saveRole = document.createElement('button');
 			saveRole.type = 'button';
@@ -2573,6 +2932,17 @@ function renderUsers(users) {
 		signOutCell.textContent = formatAccountDate(user.last_sign_out);
 		const accessCell = document.createElement('td');
 		accessCell.dataset.label = 'Access';
+		const accessActions = document.createElement('div');
+		accessActions.className = 'user-access-actions';
+		if (currentAccount.role === 'admin' && user.role === 'viewer') {
+			const viewDashboard = document.createElement('button');
+			viewDashboard.className = 'review-button';
+			viewDashboard.type = 'button';
+			viewDashboard.textContent = 'View dashboard';
+			viewDashboard.setAttribute('aria-label', `View dashboard for ${user.name}`);
+			viewDashboard.addEventListener('click', () => loadMemberDashboard(user, viewDashboard));
+			accessActions.append(viewDashboard);
+		}
 		if (currentAccount.role === 'admin' && user.id !== currentAccount.id) {
 			const remove = document.createElement('button');
 			remove.className = 'remove-button';
@@ -2580,7 +2950,10 @@ function renderUsers(users) {
 			remove.textContent = 'Delete account';
 			remove.setAttribute('aria-label', `Delete ${user.name}`);
 			remove.addEventListener('click', () => deleteAccount(user));
-			accessCell.append(remove);
+			accessActions.append(remove);
+		}
+		if (accessActions.childElementCount) {
+			accessCell.append(accessActions);
 		} else {
 			const viewOnly = document.createElement('span');
 			viewOnly.className = 'view-only';
@@ -2591,6 +2964,71 @@ function renderUsers(users) {
 		body.append(row);
 	}
 }
+
+async function loadMemberDashboard(user, button) {
+	const dialog = byId('memberDashboardDialog');
+	const content = byId('memberDashboardPreviewContent');
+	if (!dialog || !content) return;
+	byId('memberDashboardTitle').textContent = user.name;
+	content.replaceChildren();
+	showMessage('memberDashboardPreviewMessage', 'Loading member dashboard…');
+	dialog.showModal();
+	button.disabled = true;
+	try {
+		const { dashboard } = await request('admin-member-dashboard', 'GET', { id: user.id });
+		renderMemberDashboardPreview(dashboard);
+		showMessage('memberDashboardPreviewMessage', '');
+	} catch (error) {
+		showMessage('memberDashboardPreviewMessage', error.message);
+	} finally {
+		button.disabled = false;
+	}
+}
+
+function renderMemberDashboardPreview(dashboard) {
+	const content = byId('memberDashboardPreviewContent');
+	const profile = document.createElement('section');
+	profile.className = 'member-dashboard-profile';
+	addText(profile, 'p', 'member-dashboard-meta', `@${dashboard.username} · ${memberTypeLabel(dashboard.memberType)}`);
+	if (dashboard.bio) addText(profile, 'p', 'member-dashboard-bio', dashboard.bio);
+	const details = document.createElement('dl');
+	details.className = 'member-dashboard-details';
+	const country = `${countryFlag(dashboard.countryCode)} ${dashboard.location ? `${dashboard.location}${dashboard.country ? `, ${dashboard.country}` : ''}` : dashboard.country || ''}`.trim();
+	const detailRows = [
+		['Country / location', country],
+		['Joined', formatAccountDate(dashboard.joinedAt)],
+		['Last sign-in', formatAccountDate(dashboard.lastSignIn)],
+		['Instruments', dashboard.instruments],
+		['Genres', dashboard.genres]
+	].filter(([, value]) => value);
+	for (const [label, value] of detailRows) {
+		const term = document.createElement('dt');
+		term.textContent = label;
+		const description = document.createElement('dd');
+		description.textContent = value;
+		details.append(term, description);
+	}
+	profile.append(details);
+	const stats = document.createElement('div');
+	stats.className = 'dashboard-stats member-dashboard-preview-stats';
+	const statItems = [
+		['Posts shared', dashboard.counts.posts],
+		['Tracks shared', dashboard.counts.tracks],
+		['Gigs posted', dashboard.counts.gigs],
+		['Community messages', dashboard.counts.messages],
+		['Marketplace listings', dashboard.counts.listings]
+	];
+	for (const [label, value] of statItems) {
+		const card = document.createElement('article');
+		card.className = 'stat-card';
+		addText(card, 'span', 'stat-label', label);
+		addText(card, 'strong', '', Number(value).toLocaleString());
+		stats.append(card);
+	}
+	content.replaceChildren(profile, stats);
+}
+
+byId('closeMemberDashboardButton')?.addEventListener('click', () => byId('memberDashboardDialog')?.close());
 
 async function changeUserRole(user, role, button) {
 	if (role === user.role) return;
@@ -2688,12 +3126,19 @@ byId('signupForm')?.addEventListener('submit', async (event) => {
 	} catch (error) { showMessage('signupMessage', error.message); }
 });
 
-byId('showSignupButton')?.addEventListener('click', () => {
-	showMessage('signupMessage', '');
-	setStep('signup');
-	byId('signupName').focus();
+document.querySelectorAll('[data-auth-mode]').forEach((button) => {
+	button.addEventListener('click', () => {
+		const mode = button.dataset.authMode;
+		if (mode !== 'login' && mode !== 'signup') return;
+		showMessage(mode === 'signup' ? 'signupMessage' : 'loginMessage', '');
+		setStep(mode);
+		byId(mode === 'signup' ? 'signupName' : 'username').focus();
+	});
 });
-byId('cancelSignupButton')?.addEventListener('click', () => setStep('login'));
+byId('cancelSignupButton')?.addEventListener('click', () => {
+	setStep('login');
+	byId('username').focus();
+});
 
 byId('showRecoveryButton')?.addEventListener('click', () => {
 	byId('recoveryRequestForm').reset();
@@ -2721,6 +3166,7 @@ byId('recoveryRequestForm')?.addEventListener('submit', async (event) => {
 		byId('recoveryVerifyForm').hidden = false;
 		showMessage('recoveryVerifyMessage', result.message, true);
 		byId('recoveryCode').focus();
+		startRecoveryResendCooldown();
 	} catch (error) {
 		showMessage('recoveryRequestMessage', error.message);
 	} finally {
@@ -2744,6 +3190,7 @@ byId('recoveryVerifyForm')?.addEventListener('submit', async (event) => {
 		byId('recoveryRequestForm').reset();
 		byId('recoveryRequestForm').hidden = false;
 		byId('recoveryVerifyForm').hidden = true;
+		clearRecoveryResendCooldown();
 		setStep('login');
 		byId('username').value = identity;
 		showMessage('loginMessage', result.message, true);
@@ -2761,10 +3208,10 @@ byId('resendRecoveryButton')?.addEventListener('click', async (event) => {
 	try {
 		const result = await request('request-recovery-code', 'POST', { identity: byId('recoveryIdentity').value });
 		showMessage('recoveryVerifyMessage', result.message, true);
+		startRecoveryResendCooldown();
 	} catch (error) {
-		showMessage('recoveryVerifyMessage', error.message);
-	} finally {
 		button.disabled = false;
+		showMessage('recoveryVerifyMessage', error.message);
 	}
 });
 
@@ -3082,6 +3529,7 @@ async function restoreConfig(filename, btn) {
 
 async function loadState() {
 	if (location.protocol === 'file:') {
+		setSplashPhase('error');
 		if (loginView) {
 			setStep('login');
 			showMessage('loginMessage', 'Serve this page with the Node.js app at http://127.0.0.1:8001 instead of opening the HTML file.');
@@ -3098,25 +3546,24 @@ async function loadState() {
 		const recoverySetupNote = byId('recoverySetupNote');
 		if (recoverySetupNote) recoverySetupNote.hidden = Boolean(state.emailRecoveryAvailable);
 		initializeGoogleSignIn(state.googleClientId);
-		const splash = byId('welcomeSplash');
-		if (state.user) {
-			if (splash) splash.hidden = true;
-		}
-		if (state.user && mobileMode && loginView) {
-			location.replace('/world.html?mobile=1');
-			return;
+		initialSetupRequired = Boolean(state.setupRequired);
+		if (state.user && loginView) {
+			currentAccount = state.user;
+			const requestedStep = new URLSearchParams(location.search).get('signup') === '1' ? 'signup' : 'login';
+			setStep(initialSetupRequired ? 'setup' : requestedStep);
 		} else if (state.user) {
 			openWorkspace(state.user);
 		} else if (loginView) {
-			history.replaceState(null, '', '#signin');
 			const requestedStep = new URLSearchParams(location.search).get('signup') === '1' ? 'signup' : 'login';
-			setStep(state.setupRequired ? 'setup' : requestedStep);
-		} else location.replace(mobileMode ? '/mobile' : '/');
+			setStep(initialSetupRequired ? 'setup' : requestedStep);
+		} else location.replace(signInUrl());
+		setSplashPhase('ready');
 	} catch (error) {
+		setSplashPhase('error');
 		if (loginView) {
 			setStep('login');
 			showMessage('loginMessage', error.message);
-		} else location.replace(mobileMode ? '/mobile' : '/');
+		} else location.replace(signInUrl());
 	}
 }
 

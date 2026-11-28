@@ -7,22 +7,44 @@
 	<meta name="description" content="Sign in to Musicians World, a global community for musicians.">
 	<title>Musicians World | Mobile access</title>
 	<link rel="icon" type="image/svg+xml" href="/assets/musicians-world-profile.svg">
-	<link rel="stylesheet" href="/mobile/style.css?v=9">
-	<script src="/translations.js?v=4" defer></script>
-	<script src="/app.js?v=32" defer></script>
+	<link rel="stylesheet" href="/mobile/style.css?v=16">
+	<script src="/translations.js?v=13" defer></script>
+	<script src="/app.js?v=44" defer></script>
 </head>
 <body>
 	<section class="music-splash" id="welcomeSplash" aria-label="Welcome to Musicians World">
-		<div class="splash-stage" aria-hidden="true"><span class="splash-orbit orbit-one"></span><span class="splash-orbit orbit-two"></span><span class="splash-note note-one">♪</span><span class="splash-note note-two">♫</span><span class="splash-note note-three">♬</span><span class="splash-equalizer"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
-		<div class="splash-content"><a class="splash-brand" href="/mobile" aria-label="Musicians World home"><span class="splash-brand-mark"><img src="/assets/musicians-world-profile.svg" alt=""></span><span>Musicians World<span class="brand-dot">.</span></span></a><label class="splash-language"><span>Language</span><select id="introLanguage" aria-label="Choose page language"><option value="en">English</option><option value="es">Español</option><option value="fr">Français</option><option value="pt">Português</option><option value="sw">Kiswahili</option></select></label><p class="splash-kicker">A global home for music makers</p><h1>Find your people.<br><span>Make your sound.</span></h1><p class="splash-copy">Singers, instrumentalists and music lovers—one world, one stage, an endless rhythm.</p><button class="splash-enter" type="button" data-enter-site disabled>Continue <span aria-hidden="true">→</span></button><div class="splash-progress-track" id="splashProgressTrack"><progress class="splash-progress" id="splashProgress" max="30" value="0" aria-label="Welcome screen progress"></progress><span class="splash-progress-note" aria-hidden="true">♫</span></div><p class="sr-only" id="splashProgressAnnouncement" role="status" aria-live="polite" aria-atomic="true"></p></div>
-		<span class="splash-bottom">CREATE · CONNECT · PLAY TOGETHER</span>
+		<div class="splash-stage" aria-hidden="true"><span class="splash-morph"></span><span class="splash-orbit orbit-one"></span><span class="splash-orbit orbit-two"></span><span class="splash-note note-one">♪</span><span class="splash-note note-two">♫</span><span class="splash-note note-three">♬</span><span class="splash-equalizer"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span></div>
+		<div class="splash-layout">
+			<div class="splash-content">
+				<a class="splash-brand" href="/mobile" aria-label="Musicians World home"><span class="splash-brand-mark"><img src="/assets/musicians-world-profile.svg" alt=""></span><span>Musicians World<span class="brand-dot">.</span></span></a>
+				<label class="splash-language"><span>Language</span><select id="introLanguage" aria-label="Choose page language"><option value="en">English</option><option value="es">Español</option><option value="fr">Français</option><option value="pt">Português</option><option value="sw">Kiswahili</option></select></label>
+				<p class="splash-kicker">A global home for music makers</p><h1>Every sound<br><span>finds its people.</span></h1>
+				<p class="splash-copy">A home for musicians and music lovers to share ideas, discover new sounds, and make something together.</p>
+				<p class="splash-status" id="splashStatus" role="status" aria-live="polite">Please wait while we prepare your music community.</p>
+				<div class="splash-progress-track" id="splashProgressTrack" role="progressbar" aria-label="Preparing your secure session" aria-valuemin="0" aria-valuemax="100" aria-valuetext="Preparing your secure session"><span class="splash-progress-fill"></span></div>
+				<div class="splash-actions"><button class="splash-enter" id="splashContinue" type="button" data-enter-site disabled>Preparing your welcome <span aria-hidden="true">♪</span></button><button class="splash-retry" id="splashRetry" type="button" hidden>Try again</button></div>
+			</div>
+			<div class="splash-visual" aria-hidden="true"><span class="splash-visual-orbit orbit-wide"></span><span class="splash-visual-orbit orbit-tall"></span><div class="splash-record"><span class="splash-record-groove"></span><span class="splash-record-label">MW</span></div><span class="splash-visual-note note-a">♪</span><span class="splash-visual-note note-b">♫</span><div class="splash-visual-caption"><span></span> ONE COMMUNITY · EVERY SOUND</div></div>
+		</div>
 	</section>
+	<dialog class="account-options-dialog" id="accountOptionsDialog" aria-labelledby="accountOptionsTitle">
+		<form method="dialog" class="account-options-close"><button type="submit" aria-label="Close account options">×</button></form>
+		<p class="splash-kicker">YOUR MUSIC WORLD AWAITS</p><h2 id="accountOptionsTitle">How would you like to continue?</h2><p class="account-options-copy">Choose your usual sign-in or start a new community account.</p>
+		<div class="account-options-google" id="accountOptionsGoogleSection"><button class="account-options-google-fallback" id="accountOptionsGoogleFallback" type="button" disabled>Continue with Google</button><div id="accountOptionsGoogleButton" hidden></div><p class="account-options-google-note" id="accountOptionsGoogleNote" role="status">Google sign-in is not configured for this site yet.</p><p class="message" id="accountOptionsGoogleMessage" role="status"></p></div>
+		<div class="account-options-divider"><span>or use your account</span></div>
+		<div class="account-options-actions"><button class="account-option-primary" id="accountEmailButton" type="button">Sign in with email or username</button><button class="account-option-secondary" id="accountCreateButton" type="button">Create a new account</button></div>
+		<button class="account-options-cancel" id="accountOptionsCancel" type="button">Not now</button>
+	</dialog>
 	<main class="mobile-auth" id="loginView">
 		<header class="mobile-header">
 			<a class="mobile-logo" href="/mobile" aria-label="Musicians World mobile home"><span class="mobile-mark"><img src="/assets/musicians-world-profile.svg" alt=""></span><span>Musicians World<span class="period">.</span></span></a>
 			<span class="secure-label"><span aria-hidden="true"></span>Secure access</span>
 		</header>
 		<div class="mobile-card">
+			<div class="auth-mode-switch" id="authModeSwitch" role="group" aria-label="Account options" hidden>
+				<button type="button" data-auth-mode="login" aria-pressed="true">Sign in</button>
+				<button type="button" data-auth-mode="signup" aria-pressed="false">Create account</button>
+			</div>
 			<section id="setupStep" hidden>
 				<p class="mobile-step"><span></span>Initial setup · Admin</p>
 				<h1>Create your admin account</h1>
@@ -55,8 +77,8 @@
 					<p class="mobile-hint">New Google accounts receive a confirmation email and need administrator approval.</p>
 					<p class="mobile-message" id="googleLoginMessage" role="status"></p>
 				</div>
+				<button class="mobile-link-button" id="showAccountOptionsButton" type="button">More sign-in options</button>
 				<button class="mobile-link-button" id="showRecoveryButton" type="button">Forgot your password? Recover it with a code</button>
-				<button class="mobile-link-button" id="showSignupButton" type="button">Create a viewer account</button>
 				<p class="mobile-server-note">Passwords and permissions are checked by the Node.js server. New viewer accounts need administrator approval.</p>
 			</section>
 
@@ -79,6 +101,7 @@
 					<button class="mobile-primary" type="submit">Reset password securely <span aria-hidden="true">→</span></button>
 					<p class="mobile-message" id="recoveryVerifyMessage" role="alert"></p>
 					<button class="mobile-link-button" id="resendRecoveryButton" type="button">Send another code</button>
+					<p class="mobile-hint">For security, you can request another code after 60 seconds.</p>
 				</form>
 				<button class="mobile-link-button" id="cancelRecoveryButton" type="button">← Back to sign in</button>
 			</section>
